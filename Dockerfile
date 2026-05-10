@@ -25,7 +25,7 @@ RUN apk add --update --no-cache nodejs \
 
 COPY --from=builder ./source-code/build-output ./
 
-VOLUME /server/data
+#VOLUME /server/data
 ENV DATA_PATH='/server/data'
 ENV LOG_PATH='/server/data/logs'
 
