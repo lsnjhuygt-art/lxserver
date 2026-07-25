@@ -367,3 +367,4 @@ Apache License 2.0 copyright (c) 2026 [xcq0607](https://github.com/xcq0607)
 1. **Resource Usage**: Some resources used in this project, including but not limited to fonts and images, come from the internet. If there is any infringement, please contact this project for removal.
 2. **Non-Commercial Nature**: This project is only for technical feasibility exploration and research. It does not accept any commercial cooperation (including but not limited to advertising) or donations.
 3. **Acceptance of Agreement**: If you use this project, it means you accept this agreement.
+4. no
