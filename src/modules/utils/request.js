@@ -4,54 +4,13 @@ import { requestMsg } from './message'
 import { bHh } from './musicSdk/options'
 import { deflateRaw } from 'zlib'
 import * as tunnel from 'tunnel'
+import { getProxyAgent } from './proxy.js'
 
 
 const httpsRxp = /^https:/
 
-// Mock proxy config from global.lx.config if needed, or environment variables
-const getRequestAgent = async url => {
-    const config = global.lx?.config || {}
-    const proxyEnabled = config['proxy.all.enabled']
-    const proxyAddress = config['proxy.all.address']
-
-    if (proxyEnabled && proxyAddress) {
-        try {
-            const proxyUrl = new URL(proxyAddress)
-            if (proxyUrl.protocol === 'http:' || proxyUrl.protocol === 'https:') {
-                const isHttps = httpsRxp.test(url)
-                const tunnelOptions = {
-                    proxy: {
-                        host: proxyUrl.hostname,
-                        port: proxyUrl.port,
-                        proxyAuth: proxyUrl.username ? `${proxyUrl.username}:${proxyUrl.password}` : undefined
-                    }
-                }
-                return (isHttps ? tunnel.httpsOverHttp : tunnel.httpOverHttp)(tunnelOptions)
-            } else if (proxyUrl.protocol.startsWith('socks')) {
-                const { SocksProxyAgent } = await import('socks-proxy-agent')
-                return new SocksProxyAgent(proxyAddress)
-            }
-        } catch (e) {
-            // console.error('[Request] Invalid proxy address:', proxyAddress, e)
-        }
-    }
-
-    if (process.env.HTTPS_PROXY) {
-        try {
-            const proxyUrl = new URL(process.env.HTTPS_PROXY)
-            const tunnelOptions = {
-                proxy: {
-                    host: proxyUrl.hostname,
-                    port: proxyUrl.port,
-                    proxyAuth: proxyUrl.username ? `${proxyUrl.username}:${proxyUrl.password}` : undefined
-                }
-            }
-            return (httpsRxp.test(url) ? tunnel.httpsOverHttp : tunnel.httpOverHttp)(tunnelOptions)
-        } catch (e) { }
-    }
-
-    return undefined
-}
+// 内置音乐平台 SDK 的请求一律归到 music 分类（细分开关见 ./proxy.js）
+const getRequestAgent = async url => getProxyAgent(url, 'music')
 
 
 const request = (url, options, callback) => {
@@ -67,8 +26,12 @@ const request = (url, options, callback) => {
         // data.content_type = 'multipart/form-data'
         options.json = false
     }
+    // 仅设置“首字节”超时(response_timeout)。不要设置 read_timeout：
+    // Needle 的 read_timeout 是收到响应头后整个 body 读取阶段的总计时器，且不会按分片重置；
+    // 对长连接(音频代理流)而言，音频在 timeout 秒内未传输完就会被 abort 强制掐断，
+    // 表现为每首歌播放约 timeout 秒被截断、scrobble=False。v2.0.1 无此设置且正常，故移除。
+    // 封面等短资源靠 response_timeout(首字节超时)已足够防止挂起。
     options.response_timeout = options.timeout
-    options.read_timeout = options.timeout
 
     return needle.request(options.method || 'get', url, data, options, (err, resp, body) => {
         if (!err) {

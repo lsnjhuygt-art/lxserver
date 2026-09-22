@@ -37,6 +37,9 @@ class App {
         this.processCpuHistory = [];
         this.systemMemHistory = [];
         this.processMemHistory = [];
+        this.monitorLabels = [];
+        this.cpuChartInstance = null;
+        this.memChartInstance = null;
         this.monitorTimer = null;
         this.init();
         this.initVersion();
@@ -159,11 +162,18 @@ class App {
         document.querySelector('input[name="subsonic.publicLeaderboards"]')?.addEventListener('change', () => {
             this.toggleSubsonicLeaderboardVisibility();
         });
+        document.querySelector('input[name="webdav.enable"]')?.addEventListener('change', () => {
+            this.toggleWebdavVisibility();
+        });
         this.initTagSelectors();
 
         // 日志查看
         document.getElementById('refresh-logs-btn')?.addEventListener('click', () => this.loadLogs());
         document.getElementById('log-type-select')?.addEventListener('change', () => this.loadLogs());
+        document.getElementById('logs-auto-refresh-toggle')?.addEventListener('change', (e) => {
+            if (e.target.checked) this.startLogsAutoRefresh();
+            else this.stopLogsAutoRefresh();
+        });
 
         // 模态框
         document.querySelector('.modal-close')?.addEventListener('click', () => this.closeModal());
@@ -325,6 +335,7 @@ class App {
                 break;
             case 'logs':
                 this.loadLogs();
+                this.startLogsAutoRefresh();
                 break;
             case 'webdav':
                 try {
@@ -335,8 +346,13 @@ class App {
                     console.error('Failed to check webdav status:', e);
                 }
                 break;
+            case 'backups':
             case 'snapshots':
-                this.loadSnapshots();
+                if (this.currentBackupTab === 'snapshot') {
+                    this.loadSnapshots();
+                } else {
+                    this.loadConfigBackups();
+                }
                 break;
             case 'about':
                 this.loadAbout();
@@ -348,6 +364,10 @@ class App {
             case 'music':
                 window.location.href = (window.CONFIG && window.CONFIG['player.path']) || '/';
                 return;
+        }
+
+        if (viewName !== 'logs') {
+            this.stopLogsAutoRefresh();
         }
     }
 
@@ -504,15 +524,38 @@ class App {
         if (sysCpuText) sysCpuText.textContent = sysCpuVal.toFixed(2) + '%';
         if (procCpuText) procCpuText.textContent = procCpuVal.toFixed(2) + '%';
 
+        const nowStr = new Date().toLocaleTimeString('zh-CN', { hour12: false });
+        this.monitorLabels.push(nowStr);
         this.systemCpuHistory.push(sysCpuVal);
         this.processCpuHistory.push(procCpuVal);
         if (this.systemCpuHistory.length > 20) {
+            this.monitorLabels.shift();
             this.systemCpuHistory.shift();
             this.processCpuHistory.shift();
         }
-        this.renderMultiLineChart('cpu-chart', [
-            { data: this.systemCpuHistory, color: 'rgba(59, 130, 246, 0.4)', fill: true, label: 'System' },
-            { data: this.processCpuHistory, color: '#a855f7', fill: false, label: 'Process', strokeWidth: 3 }
+        this.updateChart('cpu', 'cpu-chart-canvas', this.monitorLabels, [
+            {
+                label: '系统 CPU (%)',
+                data: this.systemCpuHistory,
+                borderColor: '#3b82f6',
+                backgroundColor: 'rgba(59, 130, 246, 0.15)',
+                borderWidth: 2,
+                pointRadius: 2,
+                pointHoverRadius: 5,
+                tension: 0.35,
+                fill: true
+            },
+            {
+                label: '本服务 CPU (%)',
+                data: this.processCpuHistory,
+                borderColor: '#c084fc',
+                backgroundColor: 'rgba(192, 132, 252, 0.08)',
+                borderWidth: 2,
+                pointRadius: 2,
+                pointHoverRadius: 5,
+                tension: 0.35,
+                fill: true
+            }
         ]);
 
         // --- 内存监控 ---
@@ -525,15 +568,25 @@ class App {
         const statMemAbs = document.getElementById('stat-memory');
         if (statMemPerc) statMemPerc.textContent = sysMemVal.toFixed(2) + '%';
         if (statProcMemPerc) statProcMemPerc.textContent = procMemVal.toFixed(2) + '%';
-        if (statMemAbs) statMemAbs.textContent = this.formatFileSize(status.memory);
+        if (statMemAbs) {
+            const usedBytes = (status.totalMemory || 0) - (status.freeMemory || 0);
+            statMemAbs.textContent = `${this.formatFileSize(status.memory || 0)} / 系统已用 ${this.formatFileSize(usedBytes)}`;
+        }
 
         // 详情面板
         const memProgress = document.getElementById('monitor-mem-progress');
         const sysMemText = document.getElementById('monitor-mem-val');
         const procMemText = document.getElementById('monitor-process-mem-val');
-        if (memProgress) memProgress.style.width = sysMemVal + '%';
+        if (memProgress) memProgress.style.width = Math.min(100, Math.max(sysMemVal, procMemVal)) + '%';
         if (sysMemText) sysMemText.textContent = sysMemVal.toFixed(2) + '%';
         if (procMemText) procMemText.textContent = procMemVal.toFixed(2) + '%';
+
+        // 内存面板副标题详细信息
+        const memTotalText = document.getElementById('monitor-mem-total-text');
+        if (memTotalText && status.totalMemory) {
+            const totalMb = (status.totalMemory / 1024 / 1024 / 1024).toFixed(1);
+            memTotalText.textContent = `总容量 ${totalMb} GB · 服务占用 ${this.formatFileSize(status.memory || 0)}`;
+        }
 
         this.systemMemHistory.push(sysMemVal);
         this.processMemHistory.push(procMemVal);
@@ -541,9 +594,29 @@ class App {
             this.systemMemHistory.shift();
             this.processMemHistory.shift();
         }
-        this.renderMultiLineChart('mem-chart', [
-            { data: this.systemMemHistory, color: 'rgba(16, 185, 129, 0.4)', fill: true, label: 'System' },
-            { data: this.processMemHistory, color: '#3b82f6', fill: false, label: 'Process', strokeWidth: 3 }
+        this.updateChart('mem', 'mem-chart-canvas', this.monitorLabels, [
+            {
+                label: '系统内存 (%)',
+                data: this.systemMemHistory,
+                borderColor: '#10b981',
+                backgroundColor: 'rgba(16, 185, 129, 0.15)',
+                borderWidth: 2,
+                pointRadius: 2,
+                pointHoverRadius: 5,
+                tension: 0.35,
+                fill: true
+            },
+            {
+                label: '本服务内存 (%)',
+                data: this.processMemHistory,
+                borderColor: '#60a5fa',
+                backgroundColor: 'rgba(96, 165, 250, 0.08)',
+                borderWidth: 2,
+                pointRadius: 2,
+                pointHoverRadius: 5,
+                tension: 0.35,
+                fill: true
+            }
         ]);
 
         // --- 状态与概览更新 ---
@@ -558,54 +631,138 @@ class App {
         const statCpuInfo = document.getElementById('stat-cpu-info');
         if (statCpuInfo) {
             const speedGhz = (status.cpuSpeed / 1000).toFixed(1);
-            statCpuInfo.textContent = `${status.cpus} Cores @ ${speedGhz}GHz`;
+            statCpuInfo.textContent = `${status.cpus} 核 · 频速 ${speedGhz} GHz`;
+        }
+
+        const cpuModelText = document.getElementById('monitor-cpu-model-text');
+        if (cpuModelText && status.cpuModel) {
+            cpuModelText.textContent = `${status.cpus} Cores @ ${status.cpuModel}`;
+        }
+
+        // 更新音源总数与 WebDAV 运行标徽
+        const statSourcesInfo = document.getElementById('stat-sources-info');
+        if (statSourcesInfo && status.sourcesCount !== undefined) {
+            statSourcesInfo.textContent = `已挂载自定义源: ${status.sourcesCount} 个`;
+        }
+
+        const webdavPill = document.getElementById('dash-webdav-status-pill');
+        if (webdavPill) {
+            if (status.isWebDAVConfigured) {
+                webdavPill.textContent = 'WebDAV 已就绪';
+                webdavPill.style.background = 'rgba(16, 185, 129, 0.15)';
+                webdavPill.style.color = '#34d399';
+                webdavPill.style.borderColor = 'rgba(16, 185, 129, 0.3)';
+            } else {
+                webdavPill.textContent = 'WebDAV 未配置';
+                webdavPill.style.background = 'rgba(245, 158, 11, 0.15)';
+                webdavPill.style.color = '#fbbf24';
+                webdavPill.style.borderColor = 'rgba(245, 158, 11, 0.3)';
+            }
         }
     }
 
-    renderMultiLineChart(svgId, series) {
-        const svg = document.getElementById(svgId);
-        if (!svg) return;
+    updateChart(type, canvasId, labels, datasets) {
+        if (typeof Chart === 'undefined') return;
+        const canvas = document.getElementById(canvasId);
+        if (!canvas) return;
 
-        const width = 200;
-        const height = 60;
-        const padding = 5;
+        let chartInstance = type === 'cpu' ? this.cpuChartInstance : this.memChartInstance;
 
-        let html = '';
-        series.forEach((s, idx) => {
-            if (s.data.length < 2) return;
-
-            const points = s.data.map((val, i) => {
-                const x = (i / (s.data.length - 1)) * width;
-                const y = height - (Math.max(val, 2) / 100) * (height - padding * 2) - padding;
-                return { x, y };
+        // 计算当前数据集合中的最大值，用于自适应纵轴
+        let maxVal = 0;
+        datasets.forEach(ds => {
+            ds.data.forEach(v => {
+                if (typeof v === 'number' && v > maxVal) maxVal = v;
             });
-
-            // 二次贝塞尔曲线平滑处理
-            let d = `M ${points[0].x} ${points[0].y}`;
-            for (let i = 0; i < points.length - 1; i++) {
-                const xc = (points[i].x + points[i + 1].x) / 2;
-                const yc = (points[i].y + points[i + 1].y) / 2;
-                d += ` Q ${points[i].x} ${points[i].y} ${xc} ${yc}`;
-            }
-            d += ` L ${points[points.length - 1].x} ${points[points.length - 1].y}`;
-
-            if (s.fill) {
-                const fillD = d + ` L ${width} ${height} L 0 ${height} Z`;
-                html += `
-                    <defs>
-                        <linearGradient id="grad-${svgId}-${idx}" x1="0%" y1="0%" x2="0%" y2="100%">
-                            <stop offset="0%" style="stop-color:${s.color};stop-opacity:0.3" />
-                            <stop offset="100%" style="stop-color:${s.color};stop-opacity:0" />
-                        </linearGradient>
-                    </defs>
-                    <path d="${fillD}" fill="url(#grad-${svgId}-${idx})" />
-                `;
-            }
-
-            html += `<path d="${d}" fill="none" stroke="${s.color}" stroke-width="${s.strokeWidth || 2}" stroke-linecap="round" />`;
         });
 
-        svg.innerHTML = html;
+        // 动态量程：至少留 20% 余量，最少设为 10%，封顶 100%
+        let suggestedMax = Math.min(100, Math.max(10, Math.ceil((maxVal * 1.25) / 5) * 5));
+
+        if (!chartInstance) {
+            const ctx = canvas.getContext('2d');
+            chartInstance = new Chart(ctx, {
+                type: 'line',
+                data: {
+                    labels: [...labels],
+                    datasets: datasets
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    animation: false,
+                    interaction: {
+                        intersect: false,
+                        mode: 'index'
+                    },
+                    plugins: {
+                        legend: {
+                            display: false
+                        },
+                        tooltip: {
+                            backgroundColor: 'rgba(15, 23, 42, 0.92)',
+                            titleColor: '#e2e8f0',
+                            bodyColor: '#cbd5e1',
+                            borderColor: 'rgba(255, 255, 255, 0.12)',
+                            borderWidth: 1,
+                            padding: 10,
+                            boxPadding: 4,
+                            usePointStyle: true,
+                            callbacks: {
+                                label: function (context) {
+                                    return ` ${context.dataset.label}: ${Number(context.parsed.y).toFixed(2)}%`;
+                                }
+                            }
+                        }
+                    },
+                    scales: {
+                        x: {
+                            display: true,
+                            grid: {
+                                color: 'rgba(255, 255, 255, 0.04)',
+                                drawBorder: false
+                            },
+                            ticks: {
+                                color: 'rgba(255, 255, 255, 0.35)',
+                                font: { size: 10 },
+                                maxTicksLimit: 6,
+                                maxRotation: 0
+                            }
+                        },
+                        y: {
+                            display: true,
+                            suggestedMin: 0,
+                            suggestedMax: suggestedMax,
+                            grid: {
+                                color: 'rgba(255, 255, 255, 0.05)',
+                                drawBorder: false
+                            },
+                            ticks: {
+                                color: 'rgba(255, 255, 255, 0.4)',
+                                font: { size: 10 },
+                                callback: function (value) {
+                                    return value + '%';
+                                },
+                                maxTicksLimit: 5
+                            }
+                        }
+                    }
+                }
+            });
+
+            if (type === 'cpu') this.cpuChartInstance = chartInstance;
+            else this.memChartInstance = chartInstance;
+        } else {
+            chartInstance.data.labels = [...labels];
+            datasets.forEach((ds, i) => {
+                if (chartInstance.data.datasets[i]) {
+                    chartInstance.data.datasets[i].data = [...ds.data];
+                }
+            });
+            // 动态调节刻度范围
+            chartInstance.options.scales.y.suggestedMax = suggestedMax;
+            chartInstance.update('none'); // 无多余全量动画，保持平滑高频刷新
+        }
     }
 
 
@@ -669,7 +826,19 @@ class App {
             if (tabs) tabs.classList.add('hidden');
         }
 
+        const totalCount = this.allUsers.length;
+        const hintTitle = type === 'data' ? '选择用户以查看歌单与数据' : '选择用户以管理快照备份';
         container.innerHTML = `
+            <div class="user-selection-header fade-in">
+                <div class="user-select-hint">
+                    <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2">
+                        <circle cx="12" cy="12" r="10"/>
+                        <line x1="12" y1="16" x2="12" y2="12"/>
+                        <line x1="12" y1="8" x2="12.01" y2="8"/>
+                    </svg>
+                    <span>${hintTitle}（共 ${totalCount} 位用户）</span>
+                </div>
+            </div>
             <div class="user-selection-grid fade-in">
                 ${this.allUsers.map(user => {
                     const isPublic = user.name === '_open';
@@ -1152,11 +1321,13 @@ class App {
         const operateToggle = document.getElementById('user-custom-dir-operate-toggle');
         const writeToggle = document.getElementById('user-custom-dir-write-toggle');
         const statusEl = document.getElementById('user-custom-dir-status');
+        const autoDownloadToggle = document.getElementById('user-auto-download-toggle');
 
         if (toggle) toggle.checked = user.enableCustomMusicDir === true;
         if (dirInput) dirInput.value = user.customMusicDir || '';
         if (operateToggle) operateToggle.checked = user.allowOperateCustomMusicDir === true;
         if (writeToggle) writeToggle.checked = user.allowWriteCustomMusicDir === true;
+        if (autoDownloadToggle) autoDownloadToggle.checked = user.enableAutoDownload === true;
         if (statusEl) statusEl.textContent = '';
 
         if (user.enableCustomMusicDir) {
@@ -1178,6 +1349,7 @@ class App {
         const customDir = document.getElementById('user-custom-dir-input')?.value.trim() || '';
         const allowOperateCustomDir = document.getElementById('user-custom-dir-operate-toggle')?.checked || false;
         const allowWriteCustomDir = document.getElementById('user-custom-dir-write-toggle')?.checked || false;
+        const enableAutoDownload = document.getElementById('user-auto-download-toggle')?.checked || false;
 
         if (!newName) {
             showInfo('请填写用户名');
@@ -1190,7 +1362,8 @@ class App {
                 enableCustomMusicDir: enableCustomDir,
                 customMusicDir: customDir,
                 allowOperateCustomMusicDir: allowOperateCustomDir,
-                allowWriteCustomMusicDir: allowWriteCustomDir
+                allowWriteCustomMusicDir: allowWriteCustomDir,
+                enableAutoDownload: enableAutoDownload,
             };
             if (newName !== this.editingUser) {
                 bodyData.newName = newName;
@@ -2183,9 +2356,13 @@ class App {
         try {
             const config = await this.request('/api/config');
             this.configLoaded = true;
+            this.loadedConfig = config; // 保存原始配置，供 saveConfig 对比「需重启」字段是否变更
             const form = document.getElementById('config-form');
 
             form.elements['serverName'].value = config.serverName || '';
+            if (form.elements['debug.enabled']) {
+                form.elements['debug.enabled'].checked = config['debug.enabled'] || false;
+            }
             form.elements['maxSnapshotNum'].value = config.maxSnapshotNum || 10;
             form.elements['list.addMusicLocationType'].value = config['list.addMusicLocationType'] || 'top';
             form.elements['proxy.enabled'].checked = config['proxy.enabled'] || false;
@@ -2196,6 +2373,17 @@ class App {
             if (form.elements['proxy.all.address']) {
                 form.elements['proxy.all.address'].value = config['proxy.all.address'] || '';
             }
+            // 细分代理：enabled 为 undefined -> 沿用统一代理
+            ['music', 'customSource', 'app'].forEach(cat => {
+                const modeSel = form.elements[`proxy.${cat}.mode`];
+                if (modeSel) {
+                    const enabled = config[`proxy.${cat}.enabled`];
+                    modeSel.value = enabled === undefined || enabled === null ? 'inherit' : (enabled ? 'on' : 'off');
+                }
+                const addrEl = form.elements[`proxy.${cat}.address`];
+                if (addrEl) addrEl.value = config[`proxy.${cat}.address`] || '';
+            });
+            this.updateProxyFieldsVisibility();
             if (form.elements['user.enablePath']) {
                 form.elements['user.enablePath'].checked = config['user.enablePath'] !== false;
             }
@@ -2251,6 +2439,7 @@ class App {
             if (form.elements['webdav.enable']) {
                 form.elements['webdav.enable'].checked = config['webdav.enable'] === true;
             }
+            this.toggleWebdavVisibility();
             if (form.elements['webdav.url']) {
                 form.elements['webdav.url'].value = config['webdav.url'] || '';
             }
@@ -2271,6 +2460,26 @@ class App {
             }
             if (form.elements['sync.backupInterval']) {
                 form.elements['sync.backupInterval'].value = config['sync.backupInterval'] || 24;
+            }
+            if (form.elements['webdav.excludeCache']) {
+                form.elements['webdav.excludeCache'].checked = config['webdav.excludeCache'] === true;
+            }
+            if (form.elements['webdav.excludeMusic']) {
+                form.elements['webdav.excludeMusic'].checked = config['webdav.excludeMusic'] === true;
+            }
+
+            // 本地配置备份
+            if (form.elements['configBackup.enable']) {
+                form.elements['configBackup.enable'].checked = config['configBackup.enable'] !== false;
+            }
+            if (form.elements['configBackup.retentionDays']) {
+                form.elements['configBackup.retentionDays'].value = config['configBackup.retentionDays'] || 7;
+            }
+            if (form.elements['configBackup.dir']) {
+                form.elements['configBackup.dir'].value = config['configBackup.dir'] || '';
+            }
+            if (form.elements['snapshot.backupPath']) {
+                form.elements['snapshot.backupPath'].value = config['snapshot.backupPath'] || '';
             }
 
             // URL路径配置
@@ -2296,6 +2505,40 @@ class App {
             if (form.elements['subsonic.enableDebug']) {
                 form.elements['subsonic.enableDebug'].checked = config['subsonic.enableDebug'] === true;
             }
+            if (form.elements['subsonic.port']) {
+                form.elements['subsonic.port'].value = config['subsonic.port'] || 0;
+            }
+            // Subsonic 独立端口开关：port>0 视为开启，切换端口输入框显隐
+            const standaloneToggle = document.getElementById('subsonic-standalone-toggle');
+            const standaloneFields = document.getElementById('subsonic-standalone-fields');
+            const portErrEl = document.getElementById('subsonic-port-error');
+            if (standaloneToggle && standaloneFields) {
+                const enabled = (parseInt(config['subsonic.port']) || 0) > 0;
+                standaloneToggle.checked = enabled;
+                standaloneFields.classList.toggle('hidden', !enabled);
+                standaloneToggle.onchange = () => {
+                    const on = standaloneToggle.checked;
+                    standaloneFields.classList.toggle('hidden', !on);
+                    const portInput = form.elements['subsonic.port'];
+                    if (on && (!portInput.value || parseInt(portInput.value) === 0)) {
+                        portInput.value = 4050;
+                    } else if (!on) {
+                        portInput.value = 0;
+                    }
+                    if (portErrEl && !on) {
+                        portErrEl.style.display = 'none';
+                    }
+                };
+            }
+            if (portErrEl) {
+                const currentPort = parseInt(config['subsonic.port']) || 0;
+                if (config.subsonicPortConflict && config.subsonicPortConflict.port === currentPort && currentPort > 0) {
+                    portErrEl.textContent = `⚠️ 独立端口 ${currentPort} 启动失败（${config.subsonicPortConflict.error || '端口已被占用'}），配置未生效，请更换端口后保存并重启服务器。`;
+                    portErrEl.style.display = 'block';
+                } else {
+                    portErrEl.style.display = 'none';
+                }
+            }
             if (form.elements['subsonic.onlineSearch']) {
                 form.elements['subsonic.onlineSearch'].checked = config['subsonic.onlineSearch'] !== false;
             }
@@ -2315,6 +2558,16 @@ class App {
                 form.elements['subsonic.leaderboardSource'].value = lbSource;
                 this.updateLeaderboardSourceTagUI(lbSource);
             }
+            if (form.elements['subsonic.sharedListMode']) {
+                const mode = config['subsonic.sharedListMode'] || 'leaderboard';
+                form.elements['subsonic.sharedListMode'].value = mode;
+                this.updateTagGroupActive('tag-group-shared-mode', mode);
+            }
+            if (form.elements['subsonic.sharedListSort']) {
+                const sort = config['subsonic.sharedListSort'] || 'hot';
+                form.elements['subsonic.sharedListSort'].value = sort;
+                this.updateTagGroupActive('tag-group-shared-sort', sort);
+            }
             this.toggleSubsonicLeaderboardVisibility();
             if (form.elements['subsonic.lyricTranslation']) {
                 form.elements['subsonic.lyricTranslation'].checked = config['subsonic.lyricTranslation'] !== false;
@@ -2326,6 +2579,59 @@ class App {
                 form.elements['subsonic.playCacheFirst'].checked = config['subsonic.playCacheFirst'] !== false;
             }
 
+            // 不喜欢 / 评分联动
+            if (form.elements['subsonic.dislikeRating'] !== undefined) {
+                form.elements['subsonic.dislikeRating'].value = String(config['subsonic.dislikeRating'] ?? 1);
+            }
+            if (form.elements['subsonic.hideDisliked']) {
+                form.elements['subsonic.hideDisliked'].checked = config['subsonic.hideDisliked'] !== false;
+            }
+            if (form.elements['subsonic.dislikeCrossSource']) {
+                form.elements['subsonic.dislikeCrossSource'].checked = config['subsonic.dislikeCrossSource'] === true;
+            }
+            if (form.elements['subsonic.dislikeNoRecommend']) {
+                form.elements['subsonic.dislikeNoRecommend'].checked = config['subsonic.dislikeNoRecommend'] !== false;
+            }
+            if (form.elements['subsonic.dislikeDuetMode']) {
+                form.elements['subsonic.dislikeDuetMode'].value = config['subsonic.dislikeDuetMode'] || 'any';
+            }
+            if (form.elements['subsonic.dislikeNormalizeName']) {
+                form.elements['subsonic.dislikeNormalizeName'].checked = config['subsonic.dislikeNormalizeName'] !== false;
+            }
+            if (form.elements['subsonic.dislikeRequireSinger']) {
+                form.elements['subsonic.dislikeRequireSinger'].checked = config['subsonic.dislikeRequireSinger'] !== false;
+            }
+            if (form.elements['subsonic.linkRatingToDislike']) {
+                form.elements['subsonic.linkRatingToDislike'].checked = config['subsonic.linkRatingToDislike'] === true;
+            }
+            if (form.elements['subsonic.linkDislikeToRating']) {
+                form.elements['subsonic.linkDislikeToRating'].checked = config['subsonic.linkDislikeToRating'] === true;
+            }
+
+            // 音质 / 源优选
+            if (form.elements['subsonic.quality.enabled']) {
+                form.elements['subsonic.quality.enabled'].checked = config['subsonic.quality.enabled'] !== false;
+            }
+            if (form.elements['subsonic.quality.priority']) {
+                const qVal = config['subsonic.quality.priority'] || 'flac,320k,128k';
+                form.elements['subsonic.quality.priority'].value = qVal;
+                this.updateQualityPriorityTagUI(qVal);
+            }
+            if (form.elements['subsonic.quality.clientCapMode']) {
+                form.elements['subsonic.quality.clientCapMode'].value = config['subsonic.quality.clientCapMode'] || 'soft';
+            }
+            if (form.elements['subsonic.source.priority']) {
+                const sVal = config['subsonic.source.priority'] || 'kw,tx,wy,mg,kg';
+                form.elements['subsonic.source.priority'].value = sVal;
+                this.updateSourcePriorityTagUI(sVal);
+            }
+            if (form.elements['subsonic.source.crossPlatform']) {
+                form.elements['subsonic.source.crossPlatform'].checked = config['subsonic.source.crossPlatform'] !== false;
+            }
+            if (form.elements['subsonic.source.autoSwitchCustom']) {
+                form.elements['subsonic.source.autoSwitchCustom'].checked = config['subsonic.source.autoSwitchCustom'] !== false;
+            }
+
             // 自定义歌曲目录配置
             if (form.elements['user.enableCustomMusicDir']) {
                 form.elements['user.enableCustomMusicDir'].checked = config['user.enableCustomMusicDir'] === true;
@@ -2334,8 +2640,27 @@ class App {
             if (configJsPathRef && config.configFilePath) {
                 configJsPathRef.textContent = config.configFilePath;
             }
+            const configBackupJsPathRef = document.getElementById('config-backup-js-path-ref');
+            if (configBackupJsPathRef && config.configFilePath) {
+                configBackupJsPathRef.textContent = config.configFilePath;
+            }
         } catch (err) {
             console.error('Failed to load config:', err);
+        }
+    }
+
+    toggleWebdavVisibility() {
+        const webdavCb = document.querySelector('input[name="webdav.enable"]');
+        const childWrapper = document.getElementById('webdav-options');
+        const hintWrapper = document.getElementById('webdav-disabled-hint');
+        if (webdavCb && childWrapper && hintWrapper) {
+            if (webdavCb.checked) {
+                childWrapper.style.display = 'block';
+                hintWrapper.style.display = 'none';
+            } else {
+                childWrapper.style.display = 'none';
+                hintWrapper.style.display = 'block';
+            }
         }
     }
 
@@ -2345,6 +2670,14 @@ class App {
         if (lbCb && childWrapper) {
             childWrapper.style.display = lbCb.checked ? 'block' : 'none';
         }
+    }
+
+    updateTagGroupActive(groupId, value) {
+        const container = document.getElementById(groupId);
+        if (!container) return;
+        container.querySelectorAll('.tag-select-item').forEach(i => {
+            i.classList.toggle('active', i.getAttribute('data-value') === value);
+        });
     }
 
     initTagSelectors() {
@@ -2357,6 +2690,32 @@ class App {
                     const hiddenInput = document.querySelector('input[name="subsonic.leaderboardSource"]');
                     if (hiddenInput) hiddenInput.value = val;
                     lbContainer.querySelectorAll('.tag-select-item').forEach(i => i.classList.remove('active'));
+                    item.classList.add('active');
+                });
+            });
+        }
+        // 共享歌单内容三态
+        const modeContainer = document.getElementById('tag-group-shared-mode');
+        if (modeContainer) {
+            modeContainer.querySelectorAll('.tag-select-item').forEach(item => {
+                item.addEventListener('click', () => {
+                    const val = item.getAttribute('data-value');
+                    const hiddenInput = document.querySelector('input[name="subsonic.sharedListMode"]');
+                    if (hiddenInput) hiddenInput.value = val;
+                    modeContainer.querySelectorAll('.tag-select-item').forEach(i => i.classList.remove('active'));
+                    item.classList.add('active');
+                });
+            });
+        }
+        // 共享歌单排序
+        const sortContainer = document.getElementById('tag-group-shared-sort');
+        if (sortContainer) {
+            sortContainer.querySelectorAll('.tag-select-item').forEach(item => {
+                item.addEventListener('click', () => {
+                    const val = item.getAttribute('data-value');
+                    const hiddenInput = document.querySelector('input[name="subsonic.sharedListSort"]');
+                    if (hiddenInput) hiddenInput.value = val;
+                    sortContainer.querySelectorAll('.tag-select-item').forEach(i => i.classList.remove('active'));
                     item.classList.add('active');
                 });
             });
@@ -2385,6 +2744,10 @@ class App {
                 });
             });
         }
+
+        // 初始化音质及源优选拖拽排序标签
+        this.updateQualityPriorityTagUI('flac,320k,128k');
+        this.updateSourcePriorityTagUI('kw,tx,wy,mg,kg');
     }
 
     updateLeaderboardSourceTagUI(val) {
@@ -2411,6 +2774,207 @@ class App {
                 item.classList.remove('active');
             }
         });
+    }
+
+    renderSortableTagGroup(containerId, hiddenInputName, orderList, labelMap, allItems) {
+        const container = document.getElementById(containerId);
+        const hiddenInput = document.querySelector(`input[name="${hiddenInputName}"]`);
+        if (!container) return;
+
+        // 当前启用的项列表 (按照 orderList 顺序)
+        const enabledOrder = [];
+        const seen = new Set();
+        (orderList || []).forEach(val => {
+            val = String(val).trim();
+            if (allItems.includes(val) && !seen.has(val)) {
+                enabledOrder.push(val);
+                seen.add(val);
+            }
+        });
+
+        // 未在 orderList 中的项为禁用项，排在最后
+        const disabledOrder = [];
+        allItems.forEach(val => {
+            if (!seen.has(val)) {
+                disabledOrder.push(val);
+            }
+        });
+
+        // 同步隐藏输入框值（仅启用的项参与配置与优选，逗号分隔）
+        const syncHiddenInput = () => {
+            const activeVals = [];
+            container.querySelectorAll('.tag-sortable-item:not(.disabled)').forEach(el => {
+                activeVals.push(el.getAttribute('data-value'));
+            });
+            if (hiddenInput) {
+                hiddenInput.value = activeVals.join(',');
+            }
+        };
+
+        const refreshBadgesAndOrder = () => {
+            let activeIdx = 1;
+            container.querySelectorAll('.tag-sortable-item').forEach(el => {
+                const badge = el.querySelector('.tag-index-badge');
+                if (el.classList.contains('disabled')) {
+                    if (badge) badge.textContent = '-';
+                    el.draggable = false;
+                } else {
+                    if (badge) badge.textContent = activeIdx++;
+                    el.draggable = true;
+                }
+            });
+            syncHiddenInput();
+        };
+
+        container.innerHTML = '';
+
+        const createTagElement = (val, isDisabled) => {
+            const tag = document.createElement('div');
+            tag.className = `tag-select-item tag-sortable-item ${isDisabled ? 'disabled' : 'active'}`;
+            tag.draggable = !isDisabled;
+            tag.setAttribute('data-value', val);
+            tag.innerHTML = `
+                <span class="tag-index-badge">-</span>
+                <svg class="tag-drag-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <line x1="8" y1="6" x2="16" y2="6"></line>
+                    <line x1="8" y1="12" x2="16" y2="12"></line>
+                    <line x1="8" y1="18" x2="16" y2="18"></line>
+                </svg>
+                <span class="tag-text">${labelMap[val] || val}</span>
+                <span class="tag-toggle-btn" title="${isDisabled ? '点击启用并加入优选' : '点击禁用并移至末尾'}">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width:12px;height:12px;">
+                        ${isDisabled ? '<line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line>' : '<line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line>'}
+                    </svg>
+                </span>
+            `;
+
+            // 点击整块或点击按钮切换启用/禁用
+            tag.addEventListener('click', (e) => {
+                // 如果是拖拽动作触发的 click，不处理
+                if (tag.dataset.wasDragged === 'true') {
+                    delete tag.dataset.wasDragged;
+                    return;
+                }
+
+                if (tag.classList.contains('disabled')) {
+                    // 从禁用 -> 启用：插入到所有启用项的后面（即第一个 disabled 项前面）
+                    tag.classList.remove('disabled');
+                    tag.classList.add('active');
+                    const toggleBtn = tag.querySelector('.tag-toggle-btn');
+                    if (toggleBtn) {
+                        toggleBtn.title = '点击禁用并移至末尾';
+                        toggleBtn.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width:12px;height:12px;"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>';
+                    }
+                    const firstDisabled = container.querySelector('.tag-sortable-item.disabled');
+                    if (firstDisabled && firstDisabled !== tag) {
+                        container.insertBefore(tag, firstDisabled);
+                    } else {
+                        container.appendChild(tag);
+                    }
+                } else {
+                    // 从启用 -> 禁用：直接移到最后变灰
+                    // 至少保留一项可用
+                    const remainingActive = container.querySelectorAll('.tag-sortable-item:not(.disabled)');
+                    if (remainingActive.length <= 1) {
+                        if (typeof this?.showToast === 'function') {
+                            this.showToast('至少需要保留一个可用项', 'warning');
+                        }
+                        return;
+                    }
+
+                    tag.classList.remove('active');
+                    tag.classList.add('disabled');
+                    const toggleBtn = tag.querySelector('.tag-toggle-btn');
+                    if (toggleBtn) {
+                        toggleBtn.title = '点击启用并加入优选';
+                        toggleBtn.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width:12px;height:12px;"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>';
+                    }
+                    // 移到末尾
+                    container.appendChild(tag);
+                }
+                refreshBadgesAndOrder();
+            });
+
+            // 拖拽处理
+            tag.addEventListener('dragstart', (e) => {
+                if (tag.classList.contains('disabled')) {
+                    e.preventDefault();
+                    return;
+                }
+                tag.dataset.wasDragged = 'true';
+                tag.classList.add('dragging');
+                e.dataTransfer.effectAllowed = 'move';
+                e.dataTransfer.setData('text/plain', val);
+            });
+
+            tag.addEventListener('dragend', () => {
+                tag.classList.remove('dragging');
+                container.querySelectorAll('.tag-sortable-item').forEach(el => el.classList.remove('drag-over'));
+                refreshBadgesAndOrder();
+                setTimeout(() => { delete tag.dataset.wasDragged; }, 100);
+            });
+
+            tag.addEventListener('dragover', (e) => {
+                e.preventDefault();
+                const dragging = container.querySelector('.dragging');
+                if (!dragging || dragging === tag) return;
+                // 拖拽只能在启用项之间排序，不能插到禁用项后面
+                if (tag.classList.contains('disabled')) {
+                    const firstDisabled = container.querySelector('.tag-sortable-item.disabled');
+                    if (firstDisabled) {
+                        container.insertBefore(dragging, firstDisabled);
+                    }
+                    return;
+                }
+                e.dataTransfer.dropEffect = 'move';
+                const rect = tag.getBoundingClientRect();
+                const next = (e.clientX - rect.left) > (rect.width / 2);
+                container.insertBefore(dragging, next ? tag.nextSibling : tag);
+            });
+
+            tag.addEventListener('dragenter', (e) => {
+                e.preventDefault();
+                if (!tag.classList.contains('dragging') && !tag.classList.contains('disabled')) {
+                    tag.classList.add('drag-over');
+                }
+            });
+
+            tag.addEventListener('dragleave', () => {
+                tag.classList.remove('drag-over');
+            });
+
+            return tag;
+        };
+
+        // 先渲染启用项，再渲染禁用项
+        enabledOrder.forEach(val => container.appendChild(createTagElement(val, false)));
+        disabledOrder.forEach(val => container.appendChild(createTagElement(val, true)));
+
+        refreshBadgesAndOrder();
+    }
+
+    updateQualityPriorityTagUI(valStr) {
+        const list = (valStr || '').split(',').map(s => s.trim()).filter(Boolean);
+        const labelMap = {
+            'flac': '无损 (flac)',
+            '320k': '高品 (320k)',
+            '128k': '标准 (128k)'
+        };
+        const allItems = ['flac', '320k', '128k'];
+        this.renderSortableTagGroup('tag-group-quality-priority', 'subsonic.quality.priority', list, labelMap, allItems);
+    }
+
+    updateSourcePriorityTagUI(valStr) {
+        const list = (valStr || '').split(',').map(s => s.trim()).filter(Boolean);
+        const labelMap = {
+            'kw': '酷我音乐 (kw)',
+            'tx': 'QQ 音乐 (tx)',
+            'wy': '网易云 (wy)',
+            'mg': '咪咕音乐 (mg)',
+            'kg': '酷狗音乐 (kg)'
+        };
+        const allItems = ['kw', 'tx', 'wy', 'mg', 'kg'];
+        this.renderSortableTagGroup('tag-group-source-priority', 'subsonic.source.priority', list, labelMap, allItems);
     }
 
     togglePublicNonAdminAccessVisibility() {
@@ -2460,12 +3024,23 @@ class App {
 
         const config = {
             serverName: formData.get('serverName'),
+            'debug.enabled': formData.get('debug.enabled') === 'on',
             maxSnapshotNum: parseInt(formData.get('maxSnapshotNum')),
             'list.addMusicLocationType': formData.get('list.addMusicLocationType'),
             'proxy.enabled': formData.get('proxy.enabled') === 'on',
             'proxy.header': formData.get('proxy.header'),
             'proxy.all.enabled': formData.get('proxy.all.enabled') === 'on',
             'proxy.all.address': formData.get('proxy.all.address'),
+            ...(() => {
+                const out = {};
+                ['music', 'customSource', 'app'].forEach(cat => {
+                    const mode = formData.get(`proxy.${cat}.mode`);
+                    // null = 沿用统一代理（服务端写回 undefined）
+                    out[`proxy.${cat}.enabled`] = (mode === 'inherit' || mode == null) ? null : (mode === 'on');
+                    out[`proxy.${cat}.address`] = formData.get(`proxy.${cat}.address`) || '';
+                });
+                return out;
+            })(),
             'user.enablePath': formData.get('user.enablePath') === 'on',
             'user.enableRoot': formData.get('user.enableRoot') === 'on',
             'user.enablePublicRestriction': formData.get('user.enablePublicRestriction') === 'on',
@@ -2489,22 +3064,57 @@ class App {
             'webdav.backupPath': (formData.get('webdav.backupPath') || '').trim() || '/lx-sync-backups',
             'sync.interval': parseInt(formData.get('sync.interval')) || 60,
             'sync.backupInterval': parseInt(formData.get('sync.backupInterval')) || 24,
+            'webdav.excludeCache': formData.get('webdav.excludeCache') === 'on',
+            'webdav.excludeMusic': formData.get('webdav.excludeMusic') === 'on',
+            'configBackup.enable': formData.get('configBackup.enable') === 'on',
+            'configBackup.retentionDays': parseInt(formData.get('configBackup.retentionDays')) || 7,
+            'configBackup.dir': (formData.get('configBackup.dir') || '').trim(),
+            'snapshot.backupPath': (formData.get('snapshot.backupPath') || '').trim(),
             'admin.path': adminPath,
             'player.path': playerPath,
             'subsonic.enable': formData.get('subsonic.enable') === 'on',
             'subsonic.path': (formData.get('subsonic.path') || '').trim() || '/rest',
             'subsonic.enableDebug': formData.get('subsonic.enableDebug') === 'on',
+            'subsonic.port': parseInt(formData.get('subsonic.port')) || 0,
             'subsonic.onlineSearch': formData.get('subsonic.onlineSearch') === 'on',
             'subsonic.onlineSearchMode': formData.get('subsonic.onlineSearchMode') || 'fallback',
             'subsonic.onlineSearchSources': (formData.get('subsonic.onlineSearchSources') || '').trim() || 'wy,tx,kw,kg,mg',
             'subsonic.publicLeaderboards': formData.get('subsonic.publicLeaderboards') === 'on',
             'subsonic.leaderboardSource': (formData.get('subsonic.leaderboardSource') || '').trim() || 'tx',
+            'subsonic.sharedListMode': (formData.get('subsonic.sharedListMode') || '').trim() || 'leaderboard',
+            'subsonic.sharedListSort': (formData.get('subsonic.sharedListSort') || '').trim() || 'hot',
             'subsonic.lyricTranslation': formData.get('subsonic.lyricTranslation') === 'on',
             'subsonic.cacheOnPlay': formData.get('subsonic.cacheOnPlay') === 'on',
             'subsonic.playCacheFirst': formData.get('subsonic.playCacheFirst') === 'on',
+            'subsonic.dislikeRating': Number(formData.get('subsonic.dislikeRating') || 1),
+            'subsonic.hideDisliked': formData.get('subsonic.hideDisliked') === 'on',
+            'subsonic.dislikeCrossSource': formData.get('subsonic.dislikeCrossSource') === 'on',
+            'subsonic.dislikeNoRecommend': formData.get('subsonic.dislikeNoRecommend') === 'on',
+            'subsonic.dislikeDuetMode': formData.get('subsonic.dislikeDuetMode') || 'any',
+            'subsonic.dislikeNormalizeName': formData.get('subsonic.dislikeNormalizeName') === 'on',
+            'subsonic.dislikeRequireSinger': formData.get('subsonic.dislikeRequireSinger') === 'on',
+            'subsonic.linkRatingToDislike': formData.get('subsonic.linkRatingToDislike') === 'on',
+            'subsonic.linkDislikeToRating': formData.get('subsonic.linkDislikeToRating') === 'on',
+            'subsonic.quality.enabled': formData.get('subsonic.quality.enabled') === 'on',
+            'subsonic.quality.priority': (formData.get('subsonic.quality.priority') || '').trim() || 'flac,320k,128k',
+            'subsonic.quality.clientCapMode': formData.get('subsonic.quality.clientCapMode') || 'soft',
+            'subsonic.source.priority': (formData.get('subsonic.source.priority') || '').trim() || 'kw,tx,wy,mg,kg',
+            'subsonic.source.crossPlatform': formData.get('subsonic.source.crossPlatform') === 'on',
+            'subsonic.source.autoSwitchCustom': formData.get('subsonic.source.autoSwitchCustom') === 'on',
             'singer.sourcePriority': formData.get('singer.sourcePriority'),
             'system.allowUnsafeVM': formData.get('system.allowUnsafeVM') === 'on',
         };
+
+        // [需要重启] 以下配置仅在进程启动时由 server.ts 读取
+        // （startSubsonicStandaloneServer / handleStartServer），保存后不会即时生效，必须重启服务。
+        // 检测本次保存是否实际修改了它们，若是则提示用户重启。
+        const restartRequiredKeys = ['subsonic.enable', 'subsonic.port'];
+        const prevConfig = this.loadedConfig || {};
+        const changedRestartKeys = restartRequiredKeys.filter(k => {
+            if (k === 'subsonic.port') return Number(config[k]) !== Number(prevConfig[k]);
+            return config[k] !== prevConfig[k];
+        });
+        const needRestart = changedRestartKeys.length > 0;
 
         try {
             const res = await this.request('/api/config', {
@@ -2522,11 +3132,36 @@ class App {
             const navPlayerLink = document.getElementById('nav-player-link');
             if (navPlayerLink) navPlayerLink.href = playerPath === '' ? '/' : (playerPath ?? '/');
 
+            // 保存成功后同步「已加载配置」，供下次保存对比
+            this.loadedConfig = config;
+
             if (!silent) {
                 if (res.warning) {
                     showInfo('配置保存成功！\n\n⚠️ 警告：' + res.warning);
                 } else {
                     showSuccess('配置保存成功！');
+                }
+                // 若改动了需重启才生效的配置，提醒并支持一键重启
+                if (needRestart) {
+                    const ok = await showSelect(
+                        '需要重启服务器',
+                        `你修改了以下「需重启才能生效」的配置：\n\n• ${changedRestartKeys.join('\n• ')}\n\n` +
+                        `当前修改已保存，但必须重启 lx-server 后才会生效（例如 Subsonic 独立端口）。\n是否立即重启服务器？`,
+                        { danger: true, confirmText: '立即重启', cancelText: '稍后手动重启' }
+                    );
+                    if (ok) {
+                        try {
+                            const r = await this.request('/api/restart', { method: 'POST' });
+                            if (r.success) {
+                                showSuccess('服务器正在重启，新配置（如 Subsonic 独立端口）将在重启后生效。\n\n页面将在 5 秒后自动刷新。');
+                                setTimeout(() => window.location.reload(), 5000);
+                            } else {
+                                showError('重启失败: ' + (r.message || '未知错误'));
+                            }
+                        } catch (e) {
+                            showError('重启请求失败: ' + e.message);
+                        }
+                    }
                 }
             }
         } catch (err) {
@@ -2535,26 +3170,69 @@ class App {
         }
     }
 
-    async loadLogs() {
+    async loadLogs(isAuto = false) {
         const logType = document.getElementById('log-type-select')?.value || 'app';
 
         try {
             const data = await this.request(`/api/logs?type=${logType}&lines=200`);
             const container = document.getElementById('logs-content');
+            if (!container) return;
+
+            const titleEl = document.getElementById('terminal-active-type');
+            if (titleEl) {
+                const labelMap = { app: 'app.log', access: 'access.log', login: 'login.log', token: 'token.log', errors: 'error.log' };
+                titleEl.textContent = labelMap[logType] || `${logType}.log`;
+            }
+
+            // 检查用户是否正处于向上滚动浏览历史状态
+            const isNearBottom = container.scrollHeight - container.clientHeight <= container.scrollTop + 60;
 
             if (data.logs && data.logs.length) {
+                const countEl = document.getElementById('terminal-line-count');
+                if (countEl) countEl.textContent = `${data.logs.length} 行`;
+
                 container.innerHTML = data.logs
                     .filter(line => line.trim())
-                    .map(line => `<div class="log-line">${this.escapeHtml(line)}</div>`)
+                    .map(line => {
+                        let formatted = this.escapeHtml(line);
+                        // Highlight log levels
+                        formatted = formatted
+                            .replace(/\[(INFO|info)\]/g, '<span class="log-tag-info">INFO</span>')
+                            .replace(/\[(WARN|warn|WARNING)\]/g, '<span class="log-tag-warn">WARN</span>')
+                            .replace(/\[(ERROR|error|ERR)\]/g, '<span class="log-tag-error">ERROR</span>')
+                            .replace(/^(\d{4}[-/]\d{2}[-/]\d{2}[ T]\d{2}:\d{2}:\d{2}(?:\.\d{3})?)/, '<span class="log-time-tag">$1</span>');
+                        return `<div class="log-line">${formatted}</div>`;
+                    })
                     .join('');
 
-                // 滚动到底部
-                container.scrollTop = container.scrollHeight;
+                // 首次或者用户停留在底部时自动贴底
+                if (!isAuto || isNearBottom) {
+                    container.scrollTop = container.scrollHeight;
+                }
             } else {
-                container.innerHTML = '<p style="color: var(--text-secondary);">暂无日志</p>';
+                container.innerHTML = '<p style="color: var(--text-secondary); text-align: center; padding: 2rem;">暂无日志数据</p>';
             }
         } catch (err) {
-            document.getElementById('logs-content').innerHTML = '<p style="color: var(--accent-error);">加载日志失败</p>';
+            if (!isAuto) {
+                document.getElementById('logs-content').innerHTML = '<p style="color: var(--accent-error); text-align: center; padding: 2rem;">加载日志失败</p>';
+            }
+        }
+    }
+
+    startLogsAutoRefresh() {
+        this.stopLogsAutoRefresh();
+        this.logsRefreshTimer = setInterval(() => {
+            const toggle = document.getElementById('logs-auto-refresh-toggle');
+            if (this.currentView === 'logs' && (!toggle || toggle.checked)) {
+                this.loadLogs(true);
+            }
+        }, 3000);
+    }
+
+    stopLogsAutoRefresh() {
+        if (this.logsRefreshTimer) {
+            clearInterval(this.logsRefreshTimer);
+            this.logsRefreshTimer = null;
         }
     }
 
@@ -2579,7 +3257,14 @@ class App {
 
         if (!response.ok) {
             const text = await response.text();
-            throw new Error(text || 'Request failed');
+            let errMsg = text || 'Request failed';
+            try {
+                const json = JSON.parse(text);
+                if (json && (json.error || json.message)) {
+                    errMsg = json.error || json.message;
+                }
+            } catch { }
+            throw new Error(errMsg);
         }
 
         return response.json();
@@ -2620,8 +3305,27 @@ class App {
         }
     }
 
-    async testProxy() {
-        const address = document.querySelector('input[name="proxy.all.address"]').value;
+    // 代理地址输入框只在真正需要填地址时出现：
+    // - 统一代理开关关闭 -> 隐藏统一代理地址
+    // - 细分选「沿用统一代理」或「直连」 -> 隐藏该类的地址
+    updateProxyFieldsVisibility() {
+        const form = document.getElementById('config-form');
+        if (!form) return;
+        const allField = document.getElementById('proxy-all-address-field');
+        if (allField) {
+            allField.style.display = form.elements['proxy.all.enabled']?.checked ? '' : 'none';
+        }
+        ['music', 'customSource', 'app'].forEach(cat => {
+            const field = document.getElementById(`proxy-${cat}-address-field`);
+            if (!field) return;
+            field.style.display = form.elements[`proxy.${cat}.mode`]?.value === 'on' ? '' : 'none';
+        });
+    }
+
+    async testProxy(addressOverride) {
+        const address = addressOverride !== undefined
+            ? addressOverride
+            : (document.querySelector('input[name="proxy.all.address"]')?.value || '');
         if (!address) {
             showInfo('请输入代理地址');
             return;
@@ -2645,11 +3349,13 @@ class App {
     }
 
     async backupToWebDAV() {
-        if (!(await showSelect('WebDAV 备份', '确定要创建全量备份并上传到 WebDAV 吗？'))) return;
+        if (!(await showSelect('WebDAV 备份', '确定要创建全量备份并上传到 WebDAV 吗？\n\n系统将自动扫描本地数据、压缩打包为 ZIP 并流式传输至云端。'))) return;
 
         const statusEl = document.getElementById('sync-status-content');
-        statusEl.innerHTML = '<p style="color: var(--accent-warning);">正在备份...</p>';
-        this.showProgress(true);
+        if (statusEl) {
+            statusEl.innerHTML = '<div style="display:flex;align-items:center;gap:0.6rem;color:var(--accent-primary);"><span class="task-spinner" style="width:18px;height:18px;"></span><span>正在扫描本地文件并打包上传...</span></div>';
+        }
+        this.showProgress(true, '全量 ZIP 备份与云端归档', '正在扫描并打包服务器数据...');
 
         try {
             const result = await this.request('/api/webdav/backup', {
@@ -2657,77 +3363,296 @@ class App {
                 body: JSON.stringify({ force: true })
             });
             if (result.success) {
-                statusEl.innerHTML = '<p style="color: var(--accent-success);">✅ 备份成功！</p>';
+                if (statusEl) {
+                    statusEl.innerHTML = '<p style="color: var(--accent-success); font-weight: 600;">✅ 全量备份已成功上传至 WebDAV 云端！</p>';
+                }
                 this.loadSyncLogs();
             } else {
-                statusEl.innerHTML = '<p style="color: var(--accent-error);">❌ 备份失败</p>';
+                if (statusEl) {
+                    statusEl.innerHTML = '<p style="color: var(--accent-error);">❌ 备份失败: 服务器返回异常</p>';
+                }
             }
         } catch (err) {
-            statusEl.innerHTML = '<p style="color: var(--accent-error);">❌ 备份失败: ' + err.message + '</p>';
-        } finally {
-            setTimeout(() => this.showProgress(false), 3000);
+            if (statusEl) {
+                statusEl.innerHTML = '<p style="color: var(--accent-error);">❌ 备份失败: ' + this.escapeHtml(err.message) + '</p>';
+            }
         }
     }
 
     async restoreFromWebDAV() {
-        if (!(await showSelect('WebDAV 恢复', '⚠️ 警告：从云端恢复将覆盖本地所有数据！\n\n确定要继续吗？', { danger: true }))) return;
+        const modal = document.getElementById('restore-choice-modal');
+        if (modal) {
+            modal.classList.remove('hidden');
+            this.switchRestoreTab('zip');
+        } else {
+            // 降级兼容
+            this.executeZipRestore();
+        }
+    }
 
-        const statusEl = document.getElementById('sync-status-content');
-        statusEl.innerHTML = '<p style="color: var(--accent-warning);">正在从云端恢复数据...</p>';
+    closeRestoreModal() {
+        document.getElementById('restore-choice-modal')?.classList.add('hidden');
+    }
+
+    switchRestoreTab(tab) {
+        const zipBtn = document.getElementById('tab-btn-zip');
+        const filesBtn = document.getElementById('tab-btn-files');
+        const zipPanel = document.getElementById('restore-panel-zip');
+        const filesPanel = document.getElementById('restore-panel-files');
+
+        if (tab === 'zip') {
+            zipBtn?.classList.add('active');
+            filesBtn?.classList.remove('active');
+            zipPanel?.classList.remove('hidden');
+            filesPanel?.classList.add('hidden');
+            this.loadBackupList();
+        } else {
+            filesBtn?.classList.add('active');
+            zipBtn?.classList.remove('active');
+            filesPanel?.classList.remove('hidden');
+            zipPanel?.classList.add('hidden');
+        }
+    }
+
+    async loadBackupList() {
+        const container = document.getElementById('backup-list-container');
+        if (!container) return;
+
+        container.innerHTML = `
+            <div style="text-align:center; padding: 2rem; color: var(--text-muted);">
+                <span class="task-spinner" style="width:20px;height:20px;display:inline-block;vertical-align:middle;margin-right:6px;"></span>
+                正在获取云端备份列表...
+            </div>
+        `;
 
         try {
-            const result = await this.request('/api/webdav/restore', { method: 'POST' });
-            if (result.success) {
-                statusEl.innerHTML = '<p style="color: var(--accent-success);">✅ 恢复成功！页面将刷新...</p>';
-                setTimeout(() => location.reload(), 2000);
+            const res = await this.request('/api/webdav/backups', { method: 'GET' });
+            if (res.success && res.backups && res.backups.length > 0) {
+                let html = '<div class="backup-zip-list">';
+                res.backups.forEach((item, index) => {
+                    const isLatest = index === 0;
+                    const sizeStr = item.size ? (item.size / (1024 * 1024)).toFixed(1) + ' MB' : '大小未知';
+                    const timeStr = item.timeStr || (item.time ? new Date(item.time).toLocaleString() : '未知时间');
+                    const escapedFilename = this.escapeHtml(item.filename || item.basename);
+                    const escapedBasename = this.escapeHtml(item.basename);
+
+                    html += `
+                        <div class="backup-zip-card ${isLatest ? 'latest' : ''}">
+                            <div class="backup-zip-info">
+                                <div class="backup-zip-name">
+                                    <span>📦 ${escapedBasename}</span>
+                                    ${isLatest ? '<span class="backup-latest-tag">最新快照</span>' : ''}
+                                </div>
+                                <div class="backup-zip-meta">
+                                    <span>🕒 备份时间: ${timeStr}</span>
+                                    <span>💾 体积: ${sizeStr}</span>
+                                </div>
+                            </div>
+                            <div class="backup-zip-actions">
+                                <button type="button" class="btn-primary restore-btn-single" onclick="app.executeZipRestore('${escapedFilename}', '${escapedBasename}')">
+                                    恢复此快照
+                                </button>
+                                <button type="button" class="btn-danger-outline backup-del-btn" title="删除此备份" onclick="app.executeDeleteBackup('${escapedFilename}', '${escapedBasename}')">
+                                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width: 15px; height: 15px;">
+                                        <polyline points="3 6 5 6 21 6"></polyline>
+                                        <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path>
+                                    </svg>
+                                    删除
+                                </button>
+                            </div>
+                        </div>
+                    `;
+                });
+                html += '</div>';
+                container.innerHTML = html;
             } else {
-                statusEl.innerHTML = '<p style="color: var(--accent-error);">❌ 恢复失败</p>';
+                container.innerHTML = `
+                    <div style="text-align:center; padding: 2rem; color: var(--text-muted); background: rgba(0,0,0,0.2); border-radius: 12px;">
+                        <p style="margin: 0; font-size: 0.9rem;">⚠️ 云端备份目录暂无可恢复的 ZIP 备份文件</p>
+                        <p style="margin: 6px 0 0 0; font-size: 0.78rem;">您可以先点击主页的「立即全量备份」进行首次归档。</p>
+                    </div>
+                `;
             }
         } catch (err) {
-            statusEl.innerHTML = '<p style="color: var(--accent-error);">❌ 恢复失败: ' + err.message + '</p>';
+            container.innerHTML = `
+                <div style="text-align:center; padding: 1.5rem; color: var(--accent-error);">
+                    获取云端备份列表失败: ${this.escapeHtml(err.message)}
+                </div>
+            `;
+        }
+    }
+
+    async executeDeleteBackup(targetFilename, targetBasename) {
+        const displayName = targetBasename || targetFilename;
+        if (!(await showSelect('删除云端备份', `确定要从 WebDAV 云端永久删除备份快照「${displayName}」吗？\n\n此操作不可撤销！`, { danger: true }))) return;
+
+        try {
+            showInfo(`正在删除备份: ${displayName}...`);
+            const res = await this.request('/api/webdav/backup', {
+                method: 'DELETE',
+                body: JSON.stringify({ filename: targetFilename })
+            });
+
+            if (res.success) {
+                showSuccess(`已成功删除备份: ${displayName}`);
+                // 重新刷新备份列表
+                this.loadBackupList();
+                this.loadSyncLogs();
+            } else {
+                showError(`删除失败: ${res.message || '未知错误'}`);
+            }
+        } catch (err) {
+            showError(`删除失败: ${err.message}`);
+        }
+    }
+
+    async executeZipRestore(targetFilename, targetBasename) {
+        const displayName = targetBasename ? `备份快照「${targetBasename}」` : '最新全量备份';
+        if (!(await showSelect('全量 ZIP 恢复', `⚠️ 警告：恢复${displayName}将覆盖本地数据！\n\n确定要立即恢复吗？建议恢复前确保本地数据已妥善归档。`, { danger: true }))) return;
+
+        this.closeRestoreModal();
+
+        const statusEl = document.getElementById('sync-status-content');
+        if (statusEl) {
+            statusEl.innerHTML = `<div style="display:flex;align-items:center;gap:0.6rem;color:var(--accent-warning);"><span class="task-spinner" style="width:18px;height:18px;"></span><span>正在从云端下载并恢复${displayName}...</span></div>`;
+        }
+        this.showProgress(true, '全量快照还原', `正在从云端下载${displayName}并完全还原系统状态...`);
+
+        try {
+            const result = await this.request('/api/webdav/restore', {
+                method: 'POST',
+                body: JSON.stringify({ mode: 'zip', targetFilename: targetFilename || undefined })
+            });
+            if (result.success) {
+                if (statusEl) {
+                    statusEl.innerHTML = '<p style="color: var(--accent-success); font-weight: 600;">✅ 全量恢复成功！数据已更新，页面即将刷新...</p>';
+                }
+                setTimeout(() => location.reload(), 2000);
+            } else {
+                if (statusEl) {
+                    statusEl.innerHTML = '<p style="color: var(--accent-error);">❌ 恢复失败</p>';
+                }
+            }
+        } catch (err) {
+            if (statusEl) {
+                statusEl.innerHTML = '<p style="color: var(--accent-error);">❌ 恢复失败: ' + this.escapeHtml(err.message) + '</p>';
+            }
+        }
+    }
+
+    async executeScatteredRestore() {
+        if (!(await showSelect('散文件增量恢复', '确定要从云端增量恢复散文件吗？\n\n系统将比对云端散列文件并下载新增或变动的文件，本地独有文件将予以保留。'))) return;
+
+        this.closeRestoreModal();
+
+        const statusEl = document.getElementById('sync-status-content');
+        if (statusEl) {
+            statusEl.innerHTML = '<div style="display:flex;align-items:center;gap:0.6rem;color:var(--accent-primary);"><span class="task-spinner" style="width:18px;height:18px;"></span><span>正在比对并增量恢复散文件...</span></div>';
+        }
+        this.showProgress(true, '散文件增量恢复', '正在比对云端散文件并增量下载还原...');
+
+        try {
+            const result = await this.request('/api/webdav/restore', {
+                method: 'POST',
+                body: JSON.stringify({ mode: 'files' })
+            });
+            if (result.success) {
+                if (statusEl) {
+                    statusEl.innerHTML = '<p style="color: var(--accent-success); font-weight: 600;">✅ 散文件已成功增量同步还原！</p>';
+                }
+                this.loadSyncLogs();
+            } else {
+                if (statusEl) {
+                    statusEl.innerHTML = '<p style="color: var(--accent-error);">❌ 散文件恢复失败</p>';
+                }
+            }
+        } catch (err) {
+            if (statusEl) {
+                statusEl.innerHTML = '<p style="color: var(--accent-error);">❌ 散文件恢复失败: ' + this.escapeHtml(err.message) + '</p>';
+            }
         }
     }
 
     async syncFilesToWebDAV() {
-        if (!(await showSelect('同步文件', '确定要强制同步所有文件到 WebDAV 吗？'))) return;
+        if (!(await showSelect('同步文件', '确定要强制同步所有本地文件到 WebDAV 吗？\n\n系统将自动检测文件变动并进行多线程增量传输。'))) return;
 
         const statusEl = document.getElementById('sync-status-content');
-        statusEl.innerHTML = '<p style="color: var(--accent-warning);">正在同步文件...</p>';
-        this.showProgress(true);
+        if (statusEl) {
+            statusEl.innerHTML = '<div style="display:flex;align-items:center;gap:0.6rem;color:var(--accent-primary);"><span class="task-spinner" style="width:18px;height:18px;"></span><span>正在比对本地与云端散文件...</span></div>';
+        }
+        this.showProgress(true, '批量文件多线程同步', '正在比对本地散文件并同步至云端...');
 
         try {
             const result = await this.request('/api/webdav/sync', { method: 'POST' });
             if (result.success) {
-                statusEl.innerHTML = '<p style="color: var(--accent-success);">✅ 同步成功！</p>';
+                if (statusEl) {
+                    statusEl.innerHTML = '<p style="color: var(--accent-success); font-weight: 600;">✅ 散文件已全部同步至云端！</p>';
+                }
                 this.loadSyncLogs();
             } else {
-                statusEl.innerHTML = '<p style="color: var(--accent-error);">❌ 同步失败</p>';
+                if (statusEl) {
+                    statusEl.innerHTML = '<p style="color: var(--accent-error);">❌ 同步失败</p>';
+                }
             }
         } catch (err) {
-            statusEl.innerHTML = '<p style="color: var(--accent-error);">❌ 同步失败: ' + err.message + '</p>';
-        } finally {
-            setTimeout(() => this.showProgress(false), 3000);
+            if (statusEl) {
+                statusEl.innerHTML = '<p style="color: var(--accent-error);">❌ 同步失败: ' + this.escapeHtml(err.message) + '</p>';
+            }
         }
     }
 
-    showProgress(show) {
+    showProgress(show, title = '任务进行中', subtext = '正在与存储系统交互...') {
         const container = document.getElementById('sync-progress-container');
+        if (!container) return;
         if (show) {
             container.classList.remove('hidden');
-            this.updateProgress(0, '准备中...');
+            const titleEl = document.getElementById('progress-title');
+            const subtextEl = document.getElementById('progress-subtext');
+            if (titleEl) titleEl.textContent = title;
+            if (subtextEl) subtextEl.textContent = subtext;
+            this.setTaskStep(1);
+            this.updateProgress(0, '正在初始化...', '');
         } else {
             container.classList.add('hidden');
         }
     }
 
-    updateProgress(percent, text) {
+    setTaskStep(stepNumber) {
+        const steps = ['prepare', 'pack', 'transfer', 'finish'];
+        steps.forEach((stepName, idx) => {
+            const stepIndex = idx + 1;
+            const el = document.getElementById(`step-${stepName}`);
+            const line = document.getElementById(`stepline-${stepIndex}`);
+            if (el) {
+                el.classList.remove('active', 'done');
+                if (stepIndex < stepNumber) {
+                    el.classList.add('done');
+                } else if (stepIndex === stepNumber) {
+                    el.classList.add('active');
+                }
+            }
+            if (line) {
+                line.classList.remove('active', 'done');
+                if (stepIndex < stepNumber) {
+                    line.classList.add('done');
+                } else if (stepIndex === stepNumber) {
+                    line.classList.add('active');
+                }
+            }
+        });
+    }
+
+    updateProgress(percent, text, meta = '') {
         const bar = document.getElementById('progress-bar');
         const textEl = document.getElementById('progress-text');
-        const percentEl = document.getElementById('progress-percent');
+        const badgeEl = document.getElementById('progress-percent-badge');
+        const metaEl = document.getElementById('progress-meta');
 
-        if (bar) bar.style.width = `${percent}%`;
-        if (textEl) textEl.textContent = text;
-        if (percentEl) percentEl.textContent = `${Math.round(percent)}%`;
+        const clampedPercent = Math.max(0, Math.min(100, Math.round(percent)));
+        if (bar) bar.style.width = `${clampedPercent}%`;
+        if (textEl && text) textEl.textContent = text;
+        if (badgeEl) badgeEl.textContent = `${clampedPercent}%`;
+        if (metaEl && meta !== undefined) metaEl.textContent = meta;
     }
 
     // 辅助方法：生成歌曲标签 HTML
@@ -2804,45 +3729,87 @@ class App {
         this.sseSource.onmessage = (event) => {
             try {
                 const data = JSON.parse(event.data);
-                // console.log('SSE Progress:', data);
 
+                // 1. 实时日志推送
+                if (data.type === 'sync_log' && data.log) {
+                    this.appendLiveSyncLog(data.log);
+                    return;
+                }
+
+                // 2. 备份进度处理
                 if (data.type === 'backup') {
-                    if (data.status === 'uploading') {
-                        const percent = (data.current / data.total) * 100;
-                        this.updateProgress(percent, `正在上传备份: ${this.formatFileSize(data.current)} / ${this.formatFileSize(data.total)}`);
+                    this.showProgress(true, '全量 ZIP 备份进行中', '正在将数据压缩并上传至云端');
+                    if (data.status === 'preparing') {
+                        this.setTaskStep(1);
+                        this.updateProgress(2, data.message || '正在扫描与准备数据...', '');
                     } else if (data.status === 'packing') {
-                        this.updateProgress(5, data.message || '正在打包文件...');
-                    } else if (data.status === 'preparing') {
-                        this.updateProgress(0, data.message);
+                        this.setTaskStep(2);
+                        const percent = data.percent || (data.current && data.total ? Math.min(48, Math.round(5 + (data.current / data.total) * 43)) : 15);
+                        const meta = data.total ? `打包进度: ${data.current || 0}/${data.total} 文件` : '';
+                        this.updateProgress(percent, data.message || `正在压缩文件: ${data.file || ''}`, meta);
+                    } else if (data.status === 'packed') {
+                        this.setTaskStep(3);
+                        this.updateProgress(50, data.message || '压缩包创建完成，准备传输...', '');
+                    } else if (data.status === 'uploading') {
+                        this.setTaskStep(3);
+                        // 上传占用 50% ~ 98%
+                        const uploadRatio = data.total > 0 ? (data.current / data.total) : 0;
+                        const percent = Math.min(98, Math.round(50 + uploadRatio * 48));
+                        const meta = `${this.formatFileSize(data.current)} / ${this.formatFileSize(data.total)}`;
+                        this.updateProgress(percent, `正在上传云端: ${data.file || 'backup.zip'}`, meta);
                     } else if (data.status === 'success') {
-                        this.updateProgress(100, '备份上传完成');
+                        this.setTaskStep(4);
+                        this.updateProgress(100, '✅ 全量备份并上传完成！', '云端归档成功');
+                        setTimeout(() => this.showProgress(false), 3500);
+                        this.loadSyncLogs();
+                    } else if (data.status === 'error') {
+                        this.updateProgress(0, `❌ 备份失败: ${data.error || '未知错误'}`, '');
+                        setTimeout(() => this.showProgress(false), 5000);
                     }
                 } else if (data.type === 'sync') {
-                    if (data.status === 'processing') {
-                        const percent = (data.current / data.total) * 100;
-                        this.updateProgress(percent, `正在同步文件 (${data.current}/${data.total}): ${data.file}`)
+                    this.showProgress(true, '文件多线程同步中', '正在与 WebDAV 云端比对并同步变化');
+                    if (data.status === 'start') {
+                        this.setTaskStep(1);
+                        this.updateProgress(5, `开始同步，共 ${data.total || 0} 个文件...`, '');
+                    } else if (data.status === 'processing') {
+                        this.setTaskStep(3);
+                        const percent = data.total > 0 ? Math.min(99, Math.round((data.current / data.total) * 100)) : 50;
+                        const meta = `已完成: ${data.current}/${data.total}`;
+                        this.updateProgress(percent, `正在同步文件: ${data.file || ''}`, meta);
                     } else if (data.status === 'finish') {
-                        this.updateProgress(100, '文件同步完成');
+                        this.setTaskStep(4);
+                        const msg = data.message || (data.failCount > 0 ? `同步完成: ${data.successCount}成功，${data.failCount}失败/跳过` : '✅ 全部文件同步完成！');
+                        const meta = `共处理 ${data.total || 0} 个文件`;
+                        this.updateProgress(100, msg, meta);
+                        setTimeout(() => this.showProgress(false), 3500);
+                        this.loadSyncLogs();
+                    } else if (data.status === 'error') {
+                        this.updateProgress(0, `❌ 同步失败: ${data.message || '未知错误'}`, '');
+                        setTimeout(() => this.showProgress(false), 6000);
                     }
                 } else if (data.type === 'restore') {
-                    if (data.status === 'processing') {
-                        const percent = (data.current / data.total) * 100;
-                        this.updateProgress(percent, `正在恢复文件 (${data.current}/${data.total}): ${data.file}`);
+                    this.showProgress(true, '从云端恢复数据中', '正在拉取云端快照并还原本地');
+                    if (data.status === 'start') {
+                        this.setTaskStep(1);
+                        this.updateProgress(5, data.message || '正在检索云端数据列表...', '');
                     } else if (data.status === 'downloading') {
-                        this.updateProgress(30, data.message || '正在下载备份...');
+                        this.setTaskStep(3);
+                        this.updateProgress(35, data.message || '正在从云端下载备份包...', '');
                     } else if (data.status === 'extracting') {
-                        this.updateProgress(70, data.message || '正在解压备份...');
-                    } else if (data.status === 'start') {
-                        this.updateProgress(0, data.message || '正在从云端恢复数据...');
+                        this.setTaskStep(2);
+                        this.updateProgress(75, data.message || '正在解压并恢复数据文件...', '');
+                    } else if (data.status === 'processing') {
+                        this.setTaskStep(3);
+                        const percent = data.total > 0 ? Math.min(95, Math.round((data.current / data.total) * 100)) : 50;
+                        this.updateProgress(percent, `正在还原: ${data.file || ''}`, `进度: ${data.current}/${data.total}`);
                     } else if (data.status === 'finish') {
-                        this.updateProgress(100, data.message || '数据恢复完成');
+                        this.setTaskStep(4);
+                        this.updateProgress(100, '✅ 数据恢复完成！', '页面即将刷新生效');
+                        setTimeout(() => this.showProgress(false), 3500);
+                        this.loadSyncLogs();
                     } else if (data.status === 'error') {
-                        this.updateProgress(0, data.message || '恢复失败');
-                    }
-                } else if (data.type === 'file') {
-                    // 单文件上传进度（如果需要显示）
-                    if (data.status === 'uploading') {
-                        // 可以在这里更新更细粒度的进度，但可能会闪烁太快
+                        this.updateProgress(0, `❌ 恢复失败: ${data.message || '未知错误'}`, '');
+                        setTimeout(() => this.showProgress(false), 6000);
                     }
                 }
             } catch (e) {
@@ -2851,18 +3818,48 @@ class App {
         };
 
         this.sseSource.onerror = (err) => {
-            // console.error('SSE Error:', err);
             // 连接失败不报错，静默重试
         };
+    }
+
+    appendLiveSyncLog(log) {
+        const container = document.getElementById('sync-logs-content');
+        if (!container) return;
+
+        // 清理“暂无日志”提示
+        const emptyTip = container.querySelector('.sync-empty-tip');
+        if (emptyTip) emptyTip.remove();
+
+        const logItem = document.createElement('div');
+        logItem.className = 'sync-log-item new-log-flash';
+        logItem.innerHTML = `
+            <div class="log-info">
+                <span class="log-type log-type-${log.type}">${this.getLogTypeText(log.type)}</span>
+                <span class="log-file">${this.escapeHtml(log.file)}</span>
+                ${log.message ? `<div style="font-size: 0.75rem; color: var(--text-muted); margin-top: 0.25rem;">${this.escapeHtml(log.message)}</div>` : ''}
+            </div>
+            <div style="display: flex; align-items: center; gap: 1rem;">
+                <span class="log-status log-status-${log.status}">${log.status === 'success' ? '成功' : '失败'}</span>
+                <span class="log-time">${this.formatTime(log.timestamp)}</span>
+            </div>
+        `;
+
+        container.insertBefore(logItem, container.firstChild);
+
+        // 限制最大保留 100 条
+        while (container.children.length > 100) {
+            container.removeChild(container.lastChild);
+        }
     }
 
     async loadSyncLogs() {
         try {
             const data = await this.request('/api/webdav/logs');
             const container = document.getElementById('sync-logs-content');
+            if (!container) return;
 
             if (!data.logs || data.logs.length === 0) {
-                container.innerHTML = '<p style="color: var(--text-secondary); padding: 2rem; text-align: center;">暂无同步日志</p>';
+                container.innerHTML = '<p class="sync-empty-tip" style="color: var(--text-secondary); padding: 2.5rem; text-align: center;">暂无同步日志</p>';
                 return;
             }
 
@@ -2870,8 +3867,8 @@ class App {
             <div class="sync-log-item">
                 <div class="log-info">
                     <span class="log-type log-type-${log.type}">${this.getLogTypeText(log.type)}</span>
-                    <span class="log-file">${log.file}</span>
-                    ${log.message ? `<div style="font-size: 0.75rem; color: var(--text-muted); margin-top: 0.25rem;">${log.message}</div>` : ''}
+                    <span class="log-file">${this.escapeHtml(log.file)}</span>
+                    ${log.message ? `<div style="font-size: 0.75rem; color: var(--text-muted); margin-top: 0.25rem;">${this.escapeHtml(log.message)}</div>` : ''}
                 </div>
                 <div style="display: flex; align-items: center; gap: 1rem;">
                     <span class="log-status log-status-${log.status}">${log.status === 'success' ? '成功' : '失败'}</span>
@@ -3101,11 +4098,28 @@ class App {
         document.getElementById('sync-files-btn')?.addEventListener('click', () => this.syncFilesToWebDAV());
         document.getElementById('refresh-sync-logs-btn')?.addEventListener('click', () => this.loadSyncLogs());
         document.getElementById('test-proxy-btn')?.addEventListener('click', () => this.testProxy());
+        // 细分代理：各分类地址旁的「测试」按钮，测的是该分类自己的地址
+        document.querySelectorAll('.test-proxy-btn-cat')?.forEach(btn => {
+            btn.addEventListener('click', () => {
+                const target = btn.getAttribute('data-target');
+                const input = document.querySelector(`input[name="${target}"]`);
+                this.testProxy(input ? input.value : '');
+            });
+        });
+        // 代理地址框按需显示
+        const cfgForm = document.getElementById('config-form');
+        cfgForm?.elements['proxy.all.enabled']?.addEventListener('change', () => this.updateProxyFieldsVisibility());
+        ['music', 'customSource', 'app'].forEach(cat => {
+            cfgForm?.elements[`proxy.${cat}.mode`]?.addEventListener('change', () => this.updateProxyFieldsVisibility());
+        });
 
         // [新增] 本地备份/还原事件绑定
         document.getElementById('backup-local-btn')?.addEventListener('click', () => this.downloadLocalBackup());
         document.getElementById('restore-local-btn')?.addEventListener('click', () => document.getElementById('local-backup-input').click());
         document.getElementById('local-backup-input')?.addEventListener('change', (e) => this.handleLocalRestore(e));
+
+        // [新增] 进度卡片主动关闭/隐藏按钮
+        document.getElementById('btn-close-progress')?.addEventListener('click', () => this.showProgress(false));
 
         this.initSSE();
     }
@@ -3114,6 +4128,193 @@ class App {
         document.getElementById('new-file-btn')?.addEventListener('click', () => this.createNewFile());
         document.getElementById('new-folder-btn')?.addEventListener('click', () => this.createNewFolder());
         document.getElementById('refresh-files-btn')?.addEventListener('click', () => this.loadFiles(this.currentPath));
+    }
+
+    switchBackupTab(tab) {
+        this.currentBackupTab = tab;
+        const configBtn = document.getElementById('tab-btn-config-backup');
+        const snapshotBtn = document.getElementById('tab-btn-snapshot-backup');
+        const configPane = document.getElementById('backup-pane-config');
+        const snapshotPane = document.getElementById('backup-pane-snapshot');
+
+        if (tab === 'snapshot') {
+            snapshotBtn?.classList.add('active');
+            configBtn?.classList.remove('active');
+            snapshotPane?.classList.add('active');
+            configPane?.classList.remove('active');
+            this.loadSnapshots();
+        } else {
+            configBtn?.classList.add('active');
+            snapshotBtn?.classList.remove('active');
+            configPane?.classList.add('active');
+            snapshotPane?.classList.remove('active');
+            this.loadConfigBackups();
+        }
+    }
+
+    async loadConfigBackups() {
+        const container = document.getElementById('config-backups-list');
+        if (!container) return;
+
+        container.classList.add('content-loading');
+
+        try {
+            const data = await this.request('/api/config/backups');
+            const list = data.list || [];
+
+            // 更新状态卡片与徽标
+            const statusDot = document.getElementById('config-backup-status-dot');
+            const modeBadge = document.getElementById('config-backup-mode-badge');
+            const retentionText = document.getElementById('config-backup-retention-text');
+            const dirText = document.getElementById('config-backup-dir-text');
+
+            if (data.autoBackupEnabled) {
+                statusDot?.classList.add('dot-active');
+                if (modeBadge) {
+                    modeBadge.innerHTML = '<span class="badge-dot dot-emerald"></span><span>已开启 (每日自动)</span>';
+                }
+            } else {
+                statusDot?.classList.remove('dot-active');
+                if (modeBadge) {
+                    modeBadge.innerHTML = '<span class="badge-dot dot-red"></span><span>已停用</span>';
+                }
+            }
+
+            if (retentionText) {
+                retentionText.textContent = `${data.retentionDays || 7} 天`;
+            }
+            if (dirText) {
+                dirText.textContent = data.backupDir || 'backups';
+                dirText.title = data.backupDir || 'backups';
+            }
+
+            if (!list.length) {
+                container.innerHTML = '<div style="padding: 2.5rem; text-align: center; color: var(--text-secondary);">暂无系统配置备份文件。可点击上方【立即备份配置】手动创建第一份备份。</div>';
+                container.classList.remove('content-loading');
+                return;
+            }
+
+            container.innerHTML = list.map(item => {
+                const isManual = item.type === 'manual';
+                const typeTag = isManual
+                    ? '<span class="backup-type-tag tag-manual"><span class="badge-dot dot-purple" style="width:6px;height:6px;"></span>手动备份</span>'
+                    : '<span class="backup-type-tag tag-auto"><span class="badge-dot dot-blue" style="width:6px;height:6px;"></span>每日自动</span>';
+
+                return `
+                <div class="snapshot-row">
+                    <div class="col-time">${new Date(item.time).toLocaleString()}</div>
+                    <div class="col-id" title="${item.name}">
+                        <div style="display:flex; align-items:center; gap:8px; flex-wrap:wrap;">
+                            <span style="font-family:monospace; font-weight:600;">${item.name}</span>
+                            ${typeTag}
+                        </div>
+                    </div>
+                    <div class="col-size">${this.formatFileSize(item.size)}</div>
+                    <div class="col-actions snapshot-actions">
+                        <button class="btn-download" onclick="app.downloadConfigBackup('${item.name}')" title="下载此配置备份文件到电脑">
+                            <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2">
+                                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+                                <polyline points="7 10 12 15 17 10"></polyline>
+                                <line x1="12" y1="15" x2="12" y2="3"></line>
+                            </svg>
+                            下载
+                        </button>
+                        <button class="btn-restore" onclick="app.restoreConfigBackup('${item.name}')" title="恢复此配置并热重载">
+                            <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2">
+                                <polyline points="1 4 1 10 7 10"></polyline>
+                                <path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"></path>
+                            </svg>
+                            恢复
+                        </button>
+                        <button class="btn-delete" onclick="app.deleteConfigBackup('${item.name}')" title="删除此备份文件">
+                            <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2">
+                                <polyline points="3 6 5 6 21 6"></polyline>
+                                <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path>
+                            </svg>
+                            删除
+                        </button>
+                    </div>
+                </div>
+                `;
+            }).join('');
+
+            container.classList.remove('content-loading');
+            container.classList.add('fade-in');
+            setTimeout(() => container.classList.remove('fade-in'), 400);
+
+        } catch (err) {
+            console.error(err);
+            showError('加载配置备份列表失败: ' + err.message);
+            container.classList.remove('content-loading');
+        }
+    }
+
+    async backupConfigNow() {
+        const btn = document.getElementById('btn-backup-config-now');
+        if (btn) btn.disabled = true;
+
+        try {
+            const res = await this.request('/api/config/backup-now', { method: 'POST' });
+            if (res.success) {
+                showSuccess(`✅ 备份创建成功：${res.filename}`);
+                this.loadConfigBackups();
+            } else {
+                showError('创建备份失败: ' + (res.error || '未知错误'));
+            }
+        } catch (err) {
+            showError('创建备份请求失败: ' + err.message);
+        } finally {
+            if (btn) btn.disabled = false;
+        }
+    }
+
+    downloadConfigBackup(filename) {
+        if (!filename) return;
+        const url = `/api/config/backups/download?file=${encodeURIComponent(filename)}&auth=${encodeURIComponent(this.password)}`;
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = filename;
+        a.click();
+    }
+
+    async deleteConfigBackup(filename) {
+        if (!filename) return;
+        if (!(await showSelect('删除配置备份', `确定要删除备份文件 ${filename} 吗？\n\n删除后不可恢复。`, { danger: true }))) return;
+
+        try {
+            const res = await this.request(`/api/config/backups/${encodeURIComponent(filename)}`, { method: 'DELETE' });
+            if (res.success) {
+                showSuccess(`已成功删除备份 ${filename}`);
+                this.loadConfigBackups();
+            } else {
+                showError('删除失败: ' + (res.error || '未知错误'));
+            }
+        } catch (err) {
+            showError('删除请求失败: ' + err.message);
+        }
+    }
+
+    async restoreConfigBackup(filename) {
+        if (!filename) return;
+        if (!(await showSelect('恢复配置文件', `警告：确定要从备份 ${filename} 还原系统配置吗？\n\n1. 系统将自动为当前配置额外创建一份安全备份以防失误。\n2. 还原后将立即热重载配置生效。\n\n确定要继续恢复吗？`, { danger: true }))) {
+            return;
+        }
+
+        try {
+            const res = await this.request('/api/config/backups/restore', {
+                method: 'POST',
+                body: JSON.stringify({ fileName: filename })
+            });
+            if (res.success) {
+                showSuccess(res.message || '✅ 配置已成功恢复并热加载！');
+                this.loadConfigBackups();
+                this.loadConfig(); // 刷新配置视图中的表单值
+            } else {
+                showError('恢复失败: ' + (res.error || '未知错误'));
+            }
+        } catch (err) {
+            showError('恢复请求失败: ' + err.message);
+        }
     }
 
     async loadSnapshots() {
@@ -3303,19 +4504,32 @@ class App {
 
     // [新增] 本地备份下载
     async downloadLocalBackup() {
-        if (!(await showSelect('本地备份', '确定要创建并下载本地全量 ZIP 备份吗？\n\n这可能需要一些时间，取决于数据量。'))) return;
+        if (!(await showSelect('本地备份', '确定要创建并下载本地全量 ZIP 备份吗？\n\n数据将被打包压缩为 ZIP 文件并由浏览器直接下载。'))) return;
+
+        this.showProgress(true, '本地 ZIP 备份下载', '正在打包服务器数据，请稍候...');
+        this.setTaskStep(1);
+        this.updateProgress(10, '正在准备打包环境...', '');
 
         try {
             // 直接通过 URL 下载，后端会处理 ZIP 创建并流式传输
             const url = `/api/backup/download?auth=${encodeURIComponent(this.password)}`;
             const a = document.createElement('a');
             a.href = url;
-            // 获取当前日期作为文件名建议
             const dateStr = new Date().toISOString().split('T')[0];
             a.download = `lx-sync-backup-local-${dateStr}.zip`;
             a.click();
+
+            this.setTaskStep(3);
+            this.updateProgress(60, '正在生成并下载 ZIP 压缩包...', '');
+            setTimeout(() => {
+                this.setTaskStep(4);
+                this.updateProgress(100, '✅ 本地备份已发送到浏览器下载！', '');
+                setTimeout(() => this.showProgress(false), 3000);
+            }, 1200);
         } catch (err) {
+            this.updateProgress(0, `❌ 下载失败: ${err.message}`, '');
             showError('下载本地备份失败: ' + err.message);
+            setTimeout(() => this.showProgress(false), 4000);
         }
     }
 
@@ -3448,6 +4662,20 @@ class App {
                 }
             }, 300);
         });
+    }
+
+    openWebdavUsageModal() {
+        const modal = document.getElementById('webdav-usage-modal');
+        if (modal) {
+            modal.classList.remove('hidden');
+        }
+    }
+
+    closeWebdavUsageModal() {
+        const modal = document.getElementById('webdav-usage-modal');
+        if (modal) {
+            modal.classList.add('hidden');
+        }
     }
 }
 

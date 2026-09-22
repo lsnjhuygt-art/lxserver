@@ -27,6 +27,9 @@ window.LeaderboardManager = (function () {
         if (initialized) return;
         initialized = true;
 
+        // 预加载 dislike 规则，供歌曲行的「不喜欢」按钮判定显示状态
+        if (window.DislikeManager) window.DislikeManager.load();
+
         // 优先从缓存读取
         const cachedSource = localStorage.getItem('lb-source-select');
         state.source = cachedSource || 'wy';
@@ -192,7 +195,10 @@ window.LeaderboardManager = (function () {
             const isMatched = window.ListSearch && window.ListSearch.isMatched(index);
             const isCurrentMatch = window.ListSearch && window.ListSearch.isCurrentMatch(index);
 
-            let rowClass = 'grid grid-cols-12 gap-2 md:gap-4 p-3 rounded-xl hover:t-bg-panel group transition-colors cursor-pointer ';
+            const isDisliked = Boolean(window.DislikeManager && window.DislikeManager.isDisliked(song));
+
+            let rowClass = 'grid grid-cols-12 gap-2 md:gap-4 px-3 py-2.5 rounded-xl hover:t-bg-panel group transition-colors cursor-pointer items-center border border-transparent ';
+            if (isDisliked) rowClass += 'opacity-40 grayscale hover:opacity-80 transition-opacity ';
             if (isCurrentMatch) rowClass += 'search-current ';
             else if (isMatched) rowClass += 'search-match ';
             if (isSelected) rowClass += 'row-selected ring-1 ring-emerald-500/30 ';
@@ -216,7 +222,7 @@ window.LeaderboardManager = (function () {
                     ` : `<span class="${rankClass}">${rank}</span>`}
                 </div>
                 <!-- 封面 + 歌名 -->
-                <div class="col-span-9 sm:col-span-7 md:col-span-5 lg:col-span-4 flex items-center gap-3 min-w-0">
+                <div class="col-span-7 sm:col-span-5 md:col-span-4 lg:col-span-4 flex items-center gap-3 min-w-0 pr-2">
                     <div class="w-10 h-10 md:w-12 md:h-12 flex-shrink-0 relative rounded-lg overflow-hidden shadow-sm border t-border-main group-hover:shadow-md transition-all group-hover:scale-105 duration-300">
                         <img data-src="${imgUrl}" src="/music/assets/logo.svg"
                              class="lazy-image w-full h-full object-cover dynamic-logo is-placeholder"
@@ -239,33 +245,41 @@ window.LeaderboardManager = (function () {
                     </div>
                 </div>
                 <!-- 歌手 -->
-                <div class="hidden md:flex md:col-span-3 items-center text-xs t-text-muted overflow-hidden">
+                <div class="hidden sm:flex sm:col-span-3 md:col-span-3 lg:col-span-2 items-center text-xs md:text-sm t-text-muted overflow-hidden min-w-0">
                     ${window.createMarqueeHtml ? window.createMarqueeHtml(song.singer) : `<span class="truncate">${song.singer || '--'}</span>`}
                 </div>
                 <!-- 专辑 -->
-                <div class="hidden lg:flex lg:col-span-2 items-center text-xs t-text-muted truncate">
-                    ${song.albumName || '--'}
+                <div class="hidden lg:flex lg:col-span-2 items-center text-xs md:text-sm t-text-muted overflow-hidden min-w-0" title="${window.getSongAlbumName ? window.getSongAlbumName(song) : (song.albumName || (typeof song.album === 'string' ? song.album : (song.album?.name || '')))}">
+                    ${(() => {
+                        const alb = (window.getSongAlbumName ? window.getSongAlbumName(song) : (song.albumName || (typeof song.album === 'string' ? song.album : (song.album?.name || '')))) || '-';
+                        return window.createMarqueeHtml ? window.createMarqueeHtml(alb) : `<span class="truncate">${alb}</span>`;
+                    })()}
                 </div>
                 <!-- 时长 -->
-                <div class="hidden md:flex md:col-span-2 lg:col-span-1 items-center justify-end text-xs font-mono t-text-muted">
+                <div class="hidden md:flex md:col-span-2 lg:col-span-1 items-center justify-center text-xs md:text-sm font-mono t-text-muted min-w-0 text-center">
                     ${song.interval || '--:--'}
                 </div>
                 <!-- 操作 -->
-                <div class="col-span-2 sm:col-span-1 md:col-span-1 flex items-center justify-end gap-0 sm:gap-1 opacity-100 sm:opacity-0 group-hover:opacity-100 transition-opacity">
+                <div class="col-span-4 sm:col-span-3 md:col-span-2 lg:col-span-2 flex items-center justify-end gap-0 sm:gap-1 opacity-100 sm:opacity-0 group-hover:opacity-100 transition-opacity">
                     <button class="p-0.5 sm:p-1.5 hover:bg-emerald-50 rounded-lg text-emerald-600 transition-colors"
                             title="播放"
                             onclick="event.stopPropagation(); window.LeaderboardManager.playSong(${index})">
-                        <i class="fas fa-play w-3.5 h-3.5"></i>
+                        <i class="fas fa-play w-3.5 h-3.5 flex items-center justify-center"></i>
                     </button>
                     <button class="p-0.5 sm:p-1.5 hover:bg-blue-50 rounded-lg text-blue-600 transition-colors"
                             title="下载"
                             onclick="event.stopPropagation(); downloadSong(${JSON.stringify(song).replace(/"/g, '&quot;')})">
-                        <i class="fas fa-download w-3.5 h-3.5"></i>
+                        <i class="fas fa-download w-3.5 h-3.5 flex items-center justify-center"></i>
                     </button>
                     <button class="p-0.5 sm:p-1.5 hover:bg-emerald-50 rounded-lg text-emerald-500 transition-colors"
                             title="添加到歌单"
                             onclick="event.stopPropagation(); window.LeaderboardManager.addSongToPlaylist(${index})">
-                        <i class="fas fa-plus w-3.5 h-3.5"></i>
+                        <i class="fas fa-plus w-3.5 h-3.5 flex items-center justify-center"></i>
+                    </button>
+                    <button class="p-0.5 sm:p-1.5 hover:bg-red-50 rounded-lg ${(window.DislikeManager && window.DislikeManager.isDisliked(song)) ? 'text-red-500' : 'text-gray-400'} transition-colors"
+                            title="${(window.DislikeManager && window.DislikeManager.isDisliked(song)) ? '取消不喜欢' : '不喜欢'}"
+                            onclick="event.stopPropagation(); window.LeaderboardManager.dislikeSong(${index})">
+                        <i class="fas fa-thumbs-down w-3.5 h-3.5 flex items-center justify-center"></i>
                     </button>
                 </div>
             </div>
@@ -481,6 +495,36 @@ window.LeaderboardManager = (function () {
         renderSongs: function () {
             renderSongs(state.songs);
             renderPagination();
+        },
+
+        /**
+         * 切换某首歌的「不喜欢」状态。
+         * 走 /api/music/dislike，与 Subsonic 评分联动共用同一份规则。
+         */
+        dislikeSong: async function (index) {
+            const song = state.songs[index];
+            if (!song) return;
+            const songObj = {
+                ...song,
+                source: song.source || state.source
+            };
+            if (typeof toggleDislikeSong === 'function') {
+                await toggleDislikeSong(songObj);
+                this.renderSongs();
+            } else if (window.DislikeManager) {
+                try {
+                    const nowDisliked = await window.DislikeManager.toggleSong(songObj);
+                    this.renderSongs();
+                    if (typeof window.showToast === 'function') {
+                        window.showToast('success', nowDisliked ? '已加入不喜欢' : '已移出不喜欢');
+                    }
+                } catch (e) {
+                    console.error('[Leaderboard] dislike failed:', e);
+                    if (typeof window.showToast === 'function') {
+                        window.showToast('error', e.message || '操作失败');
+                    }
+                }
+            }
         },
 
         resetLocalPage: function () {

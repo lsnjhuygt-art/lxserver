@@ -18,25 +18,25 @@
         }
     },
     {
-        "comment": "=== 版本更新 v2.0.2 ===",
-        "id": "update_v2_0_2",
+        "comment": "=== 版本更新 v2.1.1 ===",
+        "id": "update_v2_1_1",
         "status": "active",
         "type": "version",
         "logic": {
-            "target_version": "v2.0.2",
+            "target_version": "v2.1.1",
             "operator": "<",
             "interval_hours": 24
         },
         "ui": {
-            "title": "发现新版本 v2.0.2",
-            "date": "2026-09-08",
-            "message": "本次更新包含多项 Subsonic 功能增强与核心修复：\n1. 🏆 Subsonic 公开排行榜映射，在线排行榜只读暴露 (#348)\n2. 💾 Subsonic 播放时自动缓存，离线体验增强 (#339)\n3. ❤️ Subsonic 红心收藏双向联动与在线兜底解析 (#338)\n4. 📁 文件管理器界面现代化，Docker 升级数据保留无缝迁移 (#341, #345)\n5. 🐛 修复 Subsonic 封面拉取防崩、自定义目录 songmid 报错等多个问题 (#344, #347)",
+            "title": "发现新版本 v2.1.1",
+            "date": "2026-09-22",
+            "message": "本次更新包含多项重磅功能升级与体验优化：\n1. 🔒 修复 Web 播放器开启密码时 LX 客户端连接与同步被误拦截的缺陷 (#390)\n2. 📡 Subsonic 协议全面补全：支持独立监听端口、网络电台 (Radio)、简繁体双向搜索与转码 (#382-#385)\n3. 💾 全新「配置与备份管理」面板：支持配置文件每天自动轮换备份与快照自定义目录热迁移\n4. 🌐 出站代理按类别细分配置（音乐平台 / 自定义音源 / 应用功能）独立管控 (#383)\n5. 📥 歌单同步下载全面增强：支持目标音质配置、存储位置（根/数据/自定义）灵活热迁移与即点即停 (#386-#388)\n6. 🔔 自定义源版本更新智能检测与提醒卡片，开发调试 DEBUG 开关与沙箱日志静默",
             "confirm_text": "查看日志",
             "cancel_text": "稍后提醒"
         },
         "action": {
             "type": "link",
-            "url": "https://github.com/XCQ0607/lxserver/releases/tag/v2.0.2"
+            "url": "https://github.com/XCQ0607/lxserver/releases/tag/v2.1.1"
         }
     }
 ]

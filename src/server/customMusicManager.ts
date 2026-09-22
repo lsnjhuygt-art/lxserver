@@ -49,7 +49,7 @@ export const getCustomMusicDir = (username: string): string | null => {
             }
         }
     } catch (e) {
-        console.error(`[CustomMusic] Failed to get customMusicDir for ${username}:`, e)
+        console.error(`[自定义音乐] 获取用户 ${username} 的本地音乐目录失败:`, e)
     }
     return null
 }
@@ -137,7 +137,7 @@ class CustomIndexManager {
             const obj = Object.fromEntries(index)
             fs.writeFileSync(file, JSON.stringify(obj, null, 2), 'utf-8')
         } catch (e) {
-            console.error(`[CustomIndexManager] Failed to save custom_index.json for ${username}:`, e)
+            console.error(`[自定义音乐] 为用户 ${username} 保存自定义索引失败:`, e)
         }
     }
 
@@ -189,7 +189,7 @@ const scanAllFilesRecursively = async (baseDir: string, currentDir: string = bas
             }
         }
     } catch (e) {
-        console.error(`[CustomMusic] Error reading dir ${currentDir}:`, e)
+        console.error(`[自定义音乐] 读取目录 ${currentDir} 出错:`, e)
     }
     return results
 }
@@ -204,12 +204,66 @@ const resolveSafePath = (baseDir: string, relativePath: string): string | null =
     return resolved
 }
 
+// 递归扫描 rootDir 及所有子目录中的索引文件（music_index.json / cache_index.json / custom_index.json）
+// 将各索引文件中的 filename 字段重映射为相对于 rootDir 的路径，构建统一的「相对路径 → 关联信息」查找表
+// 这样当父目录用户（B）的 customDir 包含子目录用户（A）的 customDir 时，
+// A 手动关联写入 custom_index.json 的信息也能被 B 正确读取并路径对齐
+const buildLinkedInfoMap = (rootDir: string): Map<string, any> => {
+    const map = new Map<string, any>()
+
+    const scanDir = (dir: string) => {
+        // dir 相对于 rootDir 的前缀，用于路径重映射
+        const prefix = path.relative(rootDir, dir).replace(/\\/g, '/')
+        const addPrefix = (filename: string) =>
+            prefix && prefix !== '.' ? `${prefix}/${filename}` : filename
+
+        // 读取当前目录下的索引文件
+        const indexFiles = ['music_index.json', 'cache_index.json', 'custom_index.json']
+        for (const fname of indexFiles) {
+            const fp = path.join(dir, fname)
+            if (!fs.existsSync(fp)) continue
+            try {
+                const data: Record<string, any> = JSON.parse(fs.readFileSync(fp, 'utf-8'))
+                for (const item of Object.values(data)) {
+                    if (!item || !item.filename) continue
+                    // 仅收录有真实来源（非 custom）或已手动关联（有 songmid 且 songmid !== id）的条目
+                    const isLinked = item.source && item.source !== 'custom' && item.id
+                    const isManualLinked = item.id && item.songmid && item.songmid !== item.id
+                    if (!isLinked && !isManualLinked) continue
+                    // 将条目的 filename 重映射为相对于 rootDir 的路径
+                    const remappedFilename = addPrefix(item.filename)
+                    // 深层（更靠近文件本身）的索引优先级更高，后扫描的子目录条目覆盖父目录条目
+                    map.set(remappedFilename, { ...item, filename: remappedFilename })
+                }
+            } catch (e) {
+                console.warn(`[自定义音乐] 读取 ${fname} 失败（${dir}）:`, e)
+            }
+        }
+
+        // 递归处理子目录
+        try {
+            const entries = fs.readdirSync(dir, { withFileTypes: true })
+            for (const entry of entries) {
+                if (!entry.isDirectory()) continue
+                if (entry.name.startsWith('.') || entry.name === 'node_modules') continue
+                scanDir(path.join(dir, entry.name))
+            }
+        } catch (e) { /* 无权限或不可读时跳过 */ }
+    }
+
+    scanDir(rootDir)
+    return map
+}
+
 // 同步扫描并更新自定义目录索引
 export const syncCustomIndex = async (username: string) => {
     const customDir = getCustomMusicDir(username)
     if (!customDir || !fs.existsSync(customDir)) {
         throw new Error('用户未开启或未配置自定义音乐目录')
     }
+
+    // 尝试从目录内已有的索引文件中借用关联信息
+    const linkedInfoMap = buildLinkedInfoMap(customDir)
 
     const index = customIndexManager.load(username)
     const extensions = ['.mp3', '.flac', '.m4a', '.ogg', '.wav', '.ape']
@@ -253,21 +307,7 @@ export const syncCustomIndex = async (username: string) => {
 
         const nameWithoutExt = path.basename(filePath, ext)
 
-        if (nameWithoutExt.includes('_-_')) {
-            const segs = nameWithoutExt.split('_-_')
-            if (segs.length >= 4) {
-                songName = segs[0]
-                singer = segs[1]
-            }
-        } else if (nameWithoutExt.includes(' - ')) {
-            const segs = nameWithoutExt.split(' - ')
-            if (segs.length >= 2) {
-                songName = segs[0]
-                singer = segs[1]
-                album = segs.slice(3).join(' - ')
-            }
-        }
-
+        // ① 优先读取 ID3 元数据
         let tagger: any
         try {
             tagger = new MusicTagger()
@@ -291,30 +331,54 @@ export const syncCustomIndex = async (username: string) => {
             try { if (tagger) tagger.dispose() } catch (e) { }
         }
 
+        // ② 元数据缺失时，尝试从文件名解析歌名/歌手（作为兜底）
+        if (!songName || !singer) {
+            if (nameWithoutExt.includes('_-_')) {
+                const segs = nameWithoutExt.split('_-_')
+                if (segs.length >= 4) {
+                    if (!songName) songName = segs[0]
+                    if (!singer) singer = segs[1]
+                }
+            } else if (nameWithoutExt.includes(' - ')) {
+                const segs = nameWithoutExt.split(' - ')
+                if (segs.length >= 2) {
+                    if (!songName) songName = segs[0]
+                    if (!singer) singer = segs[1]
+                    if (!album && segs.length > 3) album = segs.slice(3).join(' - ')
+                }
+            }
+        }
+
+        // ③ 最终兜底：文件名本身 / 未知歌手
         if (!songName) songName = nameWithoutExt
         if (!singer) singer = '未知歌手'
 
         const id = existing?.id || `custom_${crypto.createHash('md5').update(relPath).digest('hex')}`
 
+        // 若当前条目尚未关联（source 为 custom 或缺少 songmid），尝试从目录内的索引文件中借用关联信息
+        // relPath 形如 "歌手 - 歌名.mp3" 或 "subdir/歌手 - 歌名.mp3"，与 cache/music 索引中 filename 字段匹配
+        const needLink = !existing || existing.source === 'custom' || !existing.songmid || existing.songmid === existing.id
+        const borrowed = needLink ? (linkedInfoMap.get(relPath) ?? linkedInfoMap.get(path.basename(relPath))) : undefined
+
         const newItem: CustomCacheItem = {
-            id,
-            songmid: existing?.songmid || id,
+            id: borrowed?.id || id,
+            songmid: borrowed?.songmid || borrowed?.id || existing?.songmid || id,
             name: songName,
             singer: singer,
-            album: album,
-            albumId: existing?.albumId,
-            img: existing?.img,
-            interval: duration || existing?.interval || '',
+            album: album || borrowed?.album || existing?.album || '',
+            albumId: borrowed?.albumId || existing?.albumId,
+            img: borrowed?.img || existing?.img,
+            interval: duration || borrowed?.interval || existing?.interval || '',
             quality: quality,
             filename: relPath,
             folder: 'custom',
             subPath,
-            source: existing?.source || 'custom',
+            source: borrowed?.source || existing?.source || 'custom',
             mtime: stats.mtimeMs,
             size: stats.size,
             ext: ext.replace('.', ''),
-            hasCover: hasEmbedCover || !!existing?.hasCover,
-            coverType: hasEmbedCover ? 'embedded' : (existing?.coverType || 'none'),
+            hasCover: hasEmbedCover || !!borrowed?.hasCover || !!existing?.hasCover,
+            coverType: hasEmbedCover ? 'embedded' : (borrowed?.coverType || existing?.coverType || 'none'),
             hasLyric: hasLyricOnDisk,
             hasEmbedLyric,
             lyricFilename: hasLyricOnDisk ? path.basename(lrcFilePath) : undefined,
@@ -468,9 +532,40 @@ export const removeCustomFile = (filename: string, username: string): boolean =>
             try { fs.unlinkSync(lrcPath) } catch (e) { }
         }
         customIndexManager.remove(username, filename)
+
+        // 安全清理变空的父级子目录
+        try {
+            const resolvedBase = path.resolve(customDir)
+            let currentDir = path.resolve(path.dirname(filePath))
+            while (currentDir !== resolvedBase && currentDir.startsWith(resolvedBase + path.sep)) {
+                if (fs.existsSync(currentDir)) {
+                    const entries = fs.readdirSync(currentDir)
+                    if (entries.length === 0) {
+                        try {
+                            fs.rmdirSync(currentDir)
+                            if (global.lx?.config?.['debug.enabled']) {
+                                console.log(`[自定义音乐] [Debug] 已清理空歌单目录: ${currentDir}`)
+                            }
+                        } catch {
+                            break
+                        }
+                    } else {
+                        break
+                    }
+                } else {
+                    break
+                }
+                currentDir = path.dirname(currentDir)
+            }
+        } catch (e) {
+            if (global.lx?.config?.['debug.enabled']) {
+                console.warn(`[自定义音乐] [Debug] 清理空目录失败:`, e)
+            }
+        }
+
         return true
     } catch (e) {
-        console.error(`[CustomMusic] Failed to delete file ${filename}:`, e)
+        console.error(`[自定义音乐] 删除文件 ${filename} 失败:`, e)
         return false
     }
 }
@@ -493,7 +588,7 @@ export const linkCustomSong = async (filename: string, songInfo: any, username: 
         tagger.save()
         tagger.dispose()
     } catch (e: any) {
-        console.warn(`[CustomMusic] 写入音频标签失败: ${e.message}，继续更新索引`)
+        console.warn(`[自定义音乐] 写入音频标签失败: ${e.message}，继续更新索引`)
     }
 
     // 2. 更新 custom_index.json 中的元数据
@@ -583,7 +678,7 @@ export const batchUpdateMetadata = async (filenames: string[], username: string)
                 }
                 tagger.save()
             } catch (e) {
-                console.warn(`[CustomMusic] 批量写入标签失败: ${filename}`, e)
+                console.warn(`[自定义音乐] 批量写入标签失败: ${filename}`, e)
             } finally {
                 try { if (tagger) tagger.dispose() } catch (e) { }
             }
@@ -658,7 +753,7 @@ export const batchEmbedLyric = async (filenames: string[], username: string) => 
 
             if (fs.existsSync(lrcPath)) {
                 lyricText = fs.readFileSync(lrcPath, 'utf8')
-            } else if (item && item.source && item.source !== 'unknown' && item.source !== 'custom') {
+            } else if (item && item.source && item.source !== 'unknown' && item.source !== 'local' && item.source !== 'custom') {
                 const lyricFetcherFn = getLyricFetcher()
                 if (lyricFetcherFn) {
                     lyricText = await lyricFetcherFn(item)
@@ -735,7 +830,7 @@ export const saveCustomLyricCache = (songInfo: any, lyricsObj: any, username: st
         customIndexManager.save(username)
         return true
     } catch (e) {
-        console.error('[CustomMusic] Failed to save custom lyric cache:', e)
+        console.error('[自定义音乐] 保存自定义歌词缓存失败:', e)
         return false
     }
 }
@@ -866,7 +961,7 @@ export const replaceCustomMusicItem = async (
                 tagger.save()
                 finalHasCover = true
             } catch (e) {
-                console.warn(`[CustomMusic] 无法将原封面写入 ${targetAudioFilename}:`, e)
+                console.warn(`[自定义音乐] 无法将原封面写入 ${targetAudioFilename}:`, e)
             } finally {
                 try { if (tagger) tagger.dispose() } catch (e) { }
             }
@@ -929,12 +1024,12 @@ export const replaceCustomMusicItem = async (
         try {
             if (backedUpOldAudio && fs.existsSync(oldAudioBackup)) fs.unlinkSync(oldAudioBackup)
         } catch (cleanupErr) {
-            console.warn('[CustomMusic] 清理旧音频备份失败:', cleanupErr)
+            console.warn('[自定义音乐] 清理旧音频备份失败:', cleanupErr)
         }
         try {
             if (backedUpOldLyric && fs.existsSync(oldLyricBackup)) fs.unlinkSync(oldLyricBackup)
         } catch (cleanupErr) {
-            console.warn('[CustomMusic] 清理旧歌词备份失败:', cleanupErr)
+            console.warn('[自定义音乐] 清理旧歌词备份失败:', cleanupErr)
         }
 
         return replacementItem
@@ -956,7 +1051,7 @@ export const replaceCustomMusicItem = async (
             customIndexManager.set(username, currentItem.filename, currentItem)
             customIndexManager.save(username)
         } catch (rollbackErr) {
-            console.error('[CustomMusic] 洗版回滚失败:', rollbackErr)
+            console.error('[自定义音乐] 洗版回滚失败:', rollbackErr)
         }
         throw err
     } finally {

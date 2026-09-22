@@ -7,6 +7,10 @@ module.exports = {
   // 环境变量: SERVER_NAME
   "serverName": "lxserver",
 
+  // 是否启用 DEBUG 模式 (开启后输出详细的调试日志与音源内部日志，默认关闭，供开发人员使用)
+  // 环境变量: ENABLE_DEBUG (true/false)
+  "debug.enabled": false,
+
   // 是否使用代理转发请求到本服务器 (如果配置了 proxy.header，此项会自动设为 true)
   // 环境变量: 无 (通过 PROXY_HEADER 隐式开启)
   "proxy.enabled": false,
@@ -92,11 +96,14 @@ module.exports = {
 
   // 用户列表
   // 环境变量: LX_USER_<用户名>=<密码> (例如: LX_USER_user1=123456)
+  // 如果需要通过环境变量设置高级选项，可将值设为JSON格式，例如：
+  // LX_USER_admin={"password":"123","enableCustomMusicDir":true,"customMusicDir":"/data/music"}
   // 也可以在这里为特定用户配置独立的高级选项，例如：
   // "enableCustomMusicDir": false, // 是否启用此用户自定义歌曲目录
   // "customMusicDir": "", // 自定义歌曲目录绝对路径
   // "allowOperateCustomMusicDir": false, // 允许操作目录歌曲（如删除歌曲、洗版）
   // "allowWriteCustomMusicDir": false, // 允许写入歌曲文件（如手动关联、批量更新元数据、批量嵌入歌词）
+  // "enableAutoDownload": false, // 启用此用户自动下载歌曲功能（允许将歌单内容自动同步下载至本地数据目录）
   // "maxSnapshotNum": 10, // 最大备份快照数
   // "list.addMusicLocationType": "top" // 添加歌曲到列表时的位置 (top | bottom)
   "users": [
@@ -139,6 +146,16 @@ module.exports = {
   // 环境变量: BACKUP_INTERVAL
   "sync.backupInterval": 24,
 
+  // 是否排除缓存目录同步 (data/<用户>/cache)
+  // 开启后，各用户缓存目录将不参与增量同步及全量备份；之前已同步到云端的文件不会被删除，只有开启后新产生的变动才会被跳过
+  // 环境变量: WEBDAV_EXCLUDE_CACHE (true/false)
+  "webdav.excludeCache": false,
+
+  // 是否排除下载/音乐目录同步 (data/<用户>/music)
+  // 开启后，各用户音乐下载目录将不参与增量同步及全量备份；之前已同步到云端的文件不会被删除，只有开启后新产生的变动才会被跳过
+  // 环境变量: WEBDAV_EXCLUDE_MUSIC (true/false)
+  "webdav.excludeMusic": false,
+
   // 是否启用 Web播放器 访问密码
   // 环境变量: ENABLE_WEBPLAYER_AUTH (true/false)
   "player.enableAuth": false,
@@ -154,6 +171,41 @@ module.exports = {
   // 代理地址 (支持 http:// 或 socks5://)
   // 环境变量: PROXY_ALL_ADDRESS (例如: http://127.0.0.1:7890)
   "proxy.all.address": "",
+
+  // 细分出站代理配置：音乐平台 / 自定义音源 / 应用功能
+  // -------------------------------------------------------------
+  // 配置说明（三种状态）：
+  // 1. 沿用统一代理 (默认)：保持注释或设为 undefined，会自动继承 proxy.all.* 的开关与代理地址。
+  // 2. 独立启用代理：取消注释并将 .enabled 设为 true，并在 .address 中填入该分类专属的代理地址 (留空则沿用统一地址)。
+  // 3. 强制直连(不走代理)：取消注释并将 .enabled 设为 false，该类请求将强制直连，完全绕开任何代理（常用解决国内音乐平台被代理风控拦截的问题）。
+  // -------------------------------------------------------------
+  // 音乐平台 (内置音源 tx/wy/kg/mg/kw 等) 请求代理设置
+  // "proxy.music.enabled": false, // 例如设为 false 强制音乐平台直连
+  // "proxy.music.address": "",    // 单独的代理地址 (如 http://127.0.0.1:7890)
+
+  // 自定义音源 (用户导入的第三方 JS 音源脚本发出的请求) 代理设置
+  // "proxy.customSource.enabled": true,
+  // "proxy.customSource.address": "",
+
+  // 应用功能 (封面代理 / AcoustID 歌曲识别 / 远程音源导入等) 代理设置
+  // "proxy.app.enabled": true,
+  // "proxy.app.address": "",
+
+  // 本地配置备份（每日生成一份 config.js 本地副本并自动清理过期备份）
+  // 环境变量: CONFIG_BACKUP_ENABLE (true/false)
+  "configBackup.enable": true,
+
+  // 本地配置备份保留天数 (默认 7 天)
+  // 环境变量: CONFIG_BACKUP_RETENTION_DAYS
+  "configBackup.retentionDays": 7,
+
+  // 本地配置备份目录 (留空默认为 <data>/backups，相对路径基于 data 目录，绝对路径直接使用)
+  // 环境变量: CONFIG_BACKUP_DIR
+  "configBackup.dir": "",
+
+  // 歌单快照额外备份路径 (留空默认为用户数据目录 list/snapshot，相对路径基于 data 目录，绝对路径直接使用)
+  // 环境变量: SNAPSHOT_BACKUP_PATH
+  "snapshot.backupPath": "",
 
   // 后台管理界面访问路径（默认为 /admin）
   // 环境变量: ADMIN_PATH
@@ -172,6 +224,10 @@ module.exports = {
   // 环境变量: SUBSONIC_PATH
   "subsonic.path": "/rest",
 
+  // Subsonic 独立监听端口 (0 为不启用独立端口，共用主服务端口；>0 时单独监听指定端口)
+  // 环境变量: SUBSONIC_PORT
+  "subsonic.port": 0,
+
   // 是否开启 Subsonic 调试日志模式 (默认关闭)
   // 环境变量: SUBSONIC_ENABLE_DEBUG
   "subsonic.enableDebug": false,
@@ -188,6 +244,14 @@ module.exports = {
   // 环境变量: SUBSONIC_ONLINE_SEARCH_SOURCES
   "subsonic.onlineSearchSources": "wy,tx,kw,kg,mg",
 
+  // 是否开启 Subsonic 公开排行榜歌单 (将在线排行榜映射为只读歌单)
+  // 环境变量: SUBSONIC_PUBLIC_LEADERBOARDS (true/false)
+  "subsonic.publicLeaderboards": false,
+
+  // Subsonic 公开排行榜默认音源平台 (tx / wy / kg / kw / mg)
+  // 环境变量: SUBSONIC_LEADERBOARD_SOURCE
+  "subsonic.leaderboardSource": "tx",
+
   // 是否在 Subsonic 歌词中包含翻译
   // 环境变量: SUBSONIC_LYRIC_TRANSLATION
   "subsonic.lyricTranslation": true,
@@ -199,6 +263,14 @@ module.exports = {
   // 是否在 Subsonic 播放音乐时优先使用本地缓存/下载文件直接流式传输 (默认开启)
   // 环境变量: SUBSONIC_PLAY_CACHE_FIRST (true/false)
   "subsonic.playCacheFirst": true,
+
+  // Subsonic 音质优选总开关 (按优先级主动选最优可用音质，关闭则仅做单次解析)
+  // 环境变量: SUBSONIC_QUALITY_ENABLED (true/false)
+  "subsonic.quality.enabled": true,
+
+  // Subsonic 音质优先级列表 (从高到低，以英文逗号分隔)
+  // 环境变量: SUBSONIC_QUALITY_PRIORITY (例如: flac,320k,128k)
+  "subsonic.quality.priority": "flac,320k,128k",
 
   // 歌手信息源优先级 (多个源用逗号分隔，如 tx,wy)
   // 环境变量: SINGER_SOURCE_PRIORITY
