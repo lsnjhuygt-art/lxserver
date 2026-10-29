@@ -25,7 +25,7 @@ COPY --from=builder /source-code/server ./server
 COPY --from=builder /source-code/public ./public
 COPY --from=builder /source-code/config.js /source-code/index.js /source-code/package.json ./
 
-VOLUME /server/data
+#VOLUME /server/data
 ENV DATA_PATH='/server/data'
 ENV LOG_PATH='/server/data/logs'
 
