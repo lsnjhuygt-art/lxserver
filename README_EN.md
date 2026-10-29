@@ -495,7 +495,7 @@ The project includes PostHog statistics and version/announcement notification lo
 ## 🤝 Credits & Acknowledgements
 
 - Forked from [lyswhut/lx-music-sync-server](https://github.com/lyswhut/lx-music-sync-server).
-- Web player logic inspired by [lx-music-desktop](https://github.com/lyswhut/lx-music-desktop).
+-  by [lx-music-desktop](https://github.com/lyswhut/lx-music-desktop).
 
 ### 👥 Contributors
 
